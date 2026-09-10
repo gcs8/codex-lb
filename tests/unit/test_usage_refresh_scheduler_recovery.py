@@ -11,7 +11,7 @@ import pytest
 
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.proxy.load_balancer import effective_routing_tunables
 
 pytestmark = pytest.mark.unit
@@ -1583,6 +1583,154 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     ]
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
+    assert invalidations == 1
+    assert open_sessions == 0
+
+
+@pytest.mark.asyncio
+async def test_enabled_warmup_slices_scope_skipped_poll_followups_to_selected_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [
+        _make_account("acc_a", status=AccountStatus.ACTIVE),
+        _make_account("acc_b", status=AccountStatus.ACTIVE),
+    ]
+    usage = {
+        (account.id, window): _make_usage(
+            account.id,
+            window=window,
+            used_percent=10.0,
+            reset_at=1_800_000_000,
+            recorded_at=datetime(2026, 1, 1),
+            window_minutes=300 if window == "primary" else 10_080,
+        )
+        for account in accounts
+        for window in ("primary", "secondary")
+    }
+    open_sessions = 0
+    query_scopes: list[tuple[str | None, tuple[str, ...]]] = []
+    updater_calls: list[str] = []
+    warmup_calls: list[dict[str, object]] = []
+    invalidations = 0
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            assert account_ids is not None
+            normalized_ids = tuple(account_ids)
+            query_scopes.append((window, normalized_ids))
+            return {
+                account_id: usage[(account_id, window or "primary")]
+                for account_id in normalized_ids
+                if (account_id, window or "primary") in usage
+            }
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return accounts
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> DashboardSettings:
+            return DashboardSettings(limit_warmup_enabled=True, limit_warmup_windows="both")
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            selected_accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert open_sessions == 0
+            assert len(selected_accounts) == 1
+            selected = selected_accounts[0]
+            assert set(latest_usage) == {selected.id}
+            updater_calls.append(selected.id)
+            return len(updater_calls) == 2
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            assert open_sessions == 0
+            warmup_calls.append(kwargs)
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            yield _Session()
+        finally:
+            open_sessions -= 1
+
+    async def _invalidate() -> None:
+        nonlocal invalidations
+        invalidations += 1
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a"]
+    assert query_scopes == [
+        ("primary", ("acc_a",)),
+        ("secondary", ("acc_a",)),
+        ("monthly", ("acc_a",)),
+        ("primary", ("acc_a",)),
+        ("secondary", ("acc_a",)),
+        ("monthly", ("acc_a",)),
+    ]
+    assert len(warmup_calls) == 1
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_a"]
+    assert invalidations == 0
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a", "acc_b"]
+    assert query_scopes[-6:] == [
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
+    ]
+    assert len(warmup_calls) == 2
+    assert [account.id for account in cast("list[Account]", warmup_calls[1]["accounts"])] == ["acc_b"]
+    assert [account.id for account in cast("list[Account]", warmup_calls[1]["stagger_accounts"])] == [
+        "acc_a",
+        "acc_b",
+    ]
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["before_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["after_primary"])) == {"acc_b"}
     assert invalidations == 1
     assert open_sessions == 0
 
