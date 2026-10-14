@@ -256,6 +256,40 @@ async def test_health_ready_fails_when_active_ring_exists_but_instance_is_missin
 
 
 @pytest.mark.asyncio
+async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.core.startup._bridge_durable_schema_ready", True),
+        patch("app.core.startup._bridge_registration_complete", True),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api.get_settings") as mock_get_settings,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock()) as mock_bridge_ring,
+    ):
+        mock_get_settings.return_value = MagicMock(http_responses_session_bridge_enabled=True)
+        mock_bridge_ring.return_value = BridgeRingInfo(
+            ring_fingerprint="abc",
+            ring_size=0,
+            instance_id="pod-a",
+            is_member=False,
+        )
+
+        async def mock_get_session_context():
+            yield mock_session
+
+        mock_get_session.return_value = mock_get_session_context()
+
+        response = _assert_readiness_available(await health_ready())
+
+    assert response.status == "ok"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("heartbeat_age_seconds", [None, 31.0])
 async def test_health_ready_preserves_empty_ring_exemption(heartbeat_age_seconds: float | None):
     from app.modules.health.api import health_ready
