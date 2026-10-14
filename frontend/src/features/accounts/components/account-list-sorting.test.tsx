@@ -24,6 +24,17 @@ function visibleOrder() {
 }
 
 describe("Accounts sort selector", () => {
+  it("keeps search, status and sort in full-width filter rows", () => {
+    render(<List />);
+    const sort = screen.getByRole("combobox", { name: "Sort accounts" });
+    const filters = sort.parentElement;
+    // Structural coverage only. Chromium text ranges prove actual label fit.
+    expect(filters).toHaveClass("grid-cols-1");
+    expect(filters).not.toHaveClass("sm:grid-cols-2");
+    expect(screen.getByPlaceholderText("Search accounts...").parentElement?.parentElement).toBe(filters);
+    expect(screen.getByRole("combobox", { name: "Filter accounts by status" }).parentElement).toBe(filters);
+  });
+
   it("applies monthly and status choices to rendered rows and retains the choice during filtering", async () => {
     const user = userEvent.setup();
     render(<List />);

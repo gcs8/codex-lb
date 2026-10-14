@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import { inspectAccountFilterLabels } from "./account-filter-layout";
 import {
   accounts,
   accountTrends,
@@ -228,6 +229,23 @@ test("dashboard conversation details dialog", async ({ page }) => {
 test("accounts — light", async ({ page }) => {
   await capture(page, { file: "accounts.jpg", theme: "light", route: "/accounts" });
 });
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  test(`accounts selected filter labels fit at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await applyTheme(page, "light");
+    await page.addInitScript(() => localStorage.setItem("i18nextLng", "en"));
+    await interceptApi(page);
+    await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
+    expect(await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))).toEqual(viewport);
+    const labels = await inspectAccountFilterLabels(page);
+    for (const label of labels) {
+      expect(label.fits, JSON.stringify(label)).toBe(true);
+      expect(label.triggerFitsCard, JSON.stringify(label)).toBe(true);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  });
+}
 
 test("accounts — dark", async ({ page }) => {
   await capture(page, { file: "accounts-dark.jpg", theme: "dark", route: "/accounts" });
