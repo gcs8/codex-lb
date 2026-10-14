@@ -20854,6 +20854,94 @@ async def test_stream_with_retry_finalizes_generated_terminal_failure_before_dow
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_status", [None, 500])
+@pytest.mark.parametrize("downstream_close", [False, True])
+async def test_stream_post_terminal_health_preserves_status_and_cleanup(
+    monkeypatch, caplog, upstream_status: int | None, downstream_close: bool
+):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_terminal_status_cleanup")
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_post_terminal_status_cleanup",
+        key_id="key_post_terminal_status_cleanup",
+        model="gpt-5.1",
+    )
+    order: list[str] = []
+
+    async def settle_usage(*args: object, **kwargs: object) -> bool:
+        assert kwargs.get("wait_for_settlement") is True
+        order.append("settle")
+        return True
+
+    async def fail_health(failed_account: Account, error: UpstreamError, code: str, **kwargs: object) -> None:
+        assert failed_account is account
+        assert code == "server_error"
+        assert error["message"] == "original upstream failure"
+        assert kwargs.get("http_status") is None
+        assert kwargs.get("upstream_http_status") == upstream_status
+        order.append("health")
+        raise RuntimeError("injected post-terminal status health failure")
+
+    async def fake_stream_once(*args: object, **kwargs: object):
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        settlement.downstream_visible = True
+        settlement.response_id = "resp_post_terminal_status_cleanup"
+        yield 'data: {"type":"response.created","response":{"id":"resp_post_terminal_status_cleanup"}}\n\n'
+        if upstream_status is not None:
+            raise proxy_module.ProxyResponseError(
+                upstream_status, proxy_module.openai_error("server_error", "original upstream failure")
+            )
+        raise streaming_retry_module._TransientStreamError("server_error", {"message": "original upstream failure"})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_handle_stream_error", fail_health)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_with_retry(
+        payload,
+        {"session_id": "sid-post-terminal-status-cleanup"},
+        codex_session_affinity=False,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=reservation,
+        suppress_text_done_events=False,
+        request_transport="http",
+        upstream_stream_transport_override=None,
+    )
+    first = await anext(stream)
+    terminal = await anext(stream)
+    assert "response.created" in first
+    assert terminal.count('"type":"response.failed"') == 1
+    assert '"code":"server_error"' in terminal
+    assert '"message":"original upstream failure"' in terminal
+    if downstream_close:
+        await cast(Any, stream).aclose()
+    else:
+        assert [chunk async for chunk in stream] == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert order == ["settle", "health"]
+    service._load_balancer.record_success.assert_not_awaited()
+    health_logs = [
+        record for record in caplog.records if "Failed to write post-terminal stream health" in record.message
+    ]
+    assert len(health_logs) == 1
+    assert health_logs[0].exc_info is not None
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_event_connection_reset_surfaces_without_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
