@@ -19403,8 +19403,10 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_error_code", ["bridge_owner_unreachable", "bridge_drain_active"])
 async def test_stream_via_http_bridge_reuses_api_key_reservation_after_pre_dispatch_owner_rejection(
     monkeypatch: pytest.MonkeyPatch,
+    owner_error_code: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     started_at = time.monotonic()
@@ -19493,7 +19495,7 @@ async def test_stream_via_http_bridge_reuses_api_key_reservation_after_pre_dispa
         source = ProxyResponseError(
             503,
             proxy_service.openai_error(
-                "bridge_owner_unreachable",
+                owner_error_code,
                 "HTTP bridge owner is unreachable",
                 error_type="server_error",
             ),
@@ -29612,6 +29614,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     # relying on an earlier module having reset the shared test database.
     del db_setup
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -38878,6 +38881,87 @@ async def test_heartbeat_maintenance_tolerates_a_missing_service_or_pass() -> No
 
     await run_http_bridge_heartbeat_maintenance(None)
     await run_http_bridge_heartbeat_maintenance(SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_rejected_creator_does_not_release_the_registered_winners_durable_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained aborted creator must not release a replacement's durable row."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-rejected-creator", None)
+    settings = _make_app_settings()
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_wait_for_http_bridge_aborted_owner_within_budget",
+        AsyncMock(return_value=False),
+    )
+    stale_creator_session = _make_bridge_session(key_value="sid-rejected-creator")
+    stale_creator_session.key = key
+    registered_winner = _make_bridge_session(key_value="sid-rejected-creator-winner")
+    registered_winner.key = key
+    create_started = asyncio.Event()
+    finish_create = asyncio.Event()
+
+    async def create_session(*_: object, **__: object) -> proxy_service._HTTPBridgeSession:
+        create_started.set()
+        try:
+            await finish_create.wait()
+        except asyncio.CancelledError:
+            # The owner keeps its socket until cleanup, even after abort.
+            await finish_create.wait()
+        return stale_creator_session
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    claim_durable_session = AsyncMock()
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable_session)
+    close_http_bridge_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    async def get_session() -> proxy_service._HTTPBridgeSession | proxy_service._HTTPBridgeOwnerForward:
+        return await service._get_or_create_http_bridge_session(
+            key,
+            headers={"x-codex-turn-state": "sid-rejected-creator"},
+            affinity=proxy_service._AffinityPolicy(
+                key="sid-rejected-creator",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+
+    owner_task = asyncio.create_task(get_session())
+    await asyncio.wait_for(create_started.wait(), timeout=1.0)
+    try:
+        with pytest.raises(ProxyResponseError):
+            await asyncio.wait_for(get_session(), timeout=1.0)
+        # A stale sweeper or another replacement may win before the owner
+        # finishes. Preserve the original issue #1695 supersession invariant.
+        async with service._http_bridge_lock:
+            service._http_bridge_sessions[key] = registered_winner
+
+        finish_create.set()
+        with pytest.raises(ProxyResponseError):
+            await asyncio.wait_for(owner_task, timeout=1.0)
+    finally:
+        finish_create.set()
+        await asyncio.gather(owner_task, return_exceptions=True)
+
+    assert service._http_bridge_sessions[key] is registered_winner
+    close_http_bridge_session.assert_awaited_once_with(stale_creator_session, release_durable_session=False)
+    claim_durable_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

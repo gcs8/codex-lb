@@ -2,7 +2,7 @@
 
 ### Requirement: HTTP bridge startup admission waits are bounded
 
-The proxy MUST apply the configured proxy admission wait timeout to each HTTP
+The proxy MUST apply the fixed 10-second proxy admission wait timeout to each HTTP
 bridge startup wait attempt for per-session response-create gate acquisition,
 bridge capacity waiters, and in-flight session creation waiters.
 
@@ -18,18 +18,18 @@ opens, the proxy MUST reject the request locally with HTTP 429,
 reason.
 
 For bridge capacity waiters and in-flight session creation waiters, when the
-configured proxy admission wait timeout expires the proxy MUST reject the
+fixed proxy admission wait timeout expires the proxy MUST reject the
 request locally with HTTP 429 and a structured local-overload error envelope
 using `error.code = "capacity_exhausted_active_sessions"` unless exact-owner
 observation proves a retry-safe creator terminated inside one additional
-configured admission-wait interval. Timing out while
+fixed admission-wait interval. Timing out while
 observing another request's pending in-flight session creation MUST evict or
 abort that in-flight marker when it is still pending so later requests can
 attempt a fresh bridge session instead of waiting on the same stalled future.
 
 If the timed-out marker records an exact non-handoff owner task, the proxy MUST
 signal only that owner and retain the aborted marker while that owner is still
-running. If that exact owner terminates within one additional configured
+running. If that exact owner terminates within one additional fixed
 admission-wait interval and the key is retry-safe, the timing-out request MUST
 retry admission. If the owner does not terminate in that interval, the proxy
 MUST return the existing structured local-overload HTTP 429 and leave the
@@ -73,7 +73,7 @@ the caller.
   legitimate in-flight turn
 - **AND** a bridged Responses request that cannot soft-reroute (hard-affinity key
   or `previous_response_id` continuity)
-- **WHEN** a gate acquisition attempt exceeds the configured proxy admission wait
+- **WHEN** a gate acquisition attempt exceeds the fixed proxy admission wait
   timeout
 - **THEN** the request emits capacity-wait keepalive progress on streaming
   surfaces and retries gate acquisition
@@ -107,7 +107,7 @@ the caller.
 
 - **WHEN** a bridged Responses request waits on another request's in-flight
   session creation marker
-- **AND** the in-flight creation does not finish before the configured proxy
+- **AND** the in-flight creation does not finish before the fixed proxy
   admission wait timeout
 - **THEN** the waiter is rejected locally with HTTP 429 and
   `error.code = "capacity_exhausted_active_sessions"` unless the marker's exact
@@ -119,7 +119,7 @@ the caller.
 
 - **WHEN** a bridged Responses request waits on another request's in-flight
   session creation marker that records an exact non-handoff owner task
-- **AND** the in-flight creation does not finish before the configured proxy
+- **AND** the in-flight creation does not finish before the fixed proxy
   admission wait timeout
 - **AND** that exact owner remains running through the additional bounded owner
   observation interval
@@ -132,7 +132,7 @@ the caller.
 
 - **WHEN** the HTTP bridge is at capacity and a request waits for in-flight
   bridge work to free capacity
-- **AND** no capacity becomes available before the configured proxy admission
+- **AND** no capacity becomes available before the fixed proxy admission
   wait timeout
 - **THEN** the waiter is rejected locally with HTTP 429 and
   `error.code = "capacity_exhausted_active_sessions"`
@@ -196,7 +196,7 @@ the caller.
 #### Scenario: Generated turn-state owner is not silently replaced
 
 - **WHEN** a generated turn-state in-flight creation waiter reaches the
-  configured proxy admission wait timeout
+  fixed proxy admission wait timeout
 - **THEN** the waiter returns the existing structured local-overload HTTP 429
 - **AND** the owner-held marker remains registered while the owner is still
   running
