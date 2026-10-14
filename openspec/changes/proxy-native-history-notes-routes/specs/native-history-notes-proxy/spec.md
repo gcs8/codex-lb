@@ -105,3 +105,28 @@ for payload validation and error shape.
 - **THEN** it forwards the body unchanged to one selected account without
   a `history_session` pin
 - **AND** it does not retry on another account
+
+### Requirement: Native route compatibility and affinity observations stay consistent
+
+Native history and notes routes MUST preserve the canonical upstream path and
+request body when a client follows a trailing-slash redirect. Invalid JSON or
+non-object request bodies MUST return the existing OpenAI-compatible invalid
+request error envelope. The documented affinity observation source domain MUST
+include `history_session` whenever the classifier emits it.
+
+#### Scenario: Trailing slash reaches the same native operation
+
+- **WHEN** a client posts a supported native route with a trailing slash and follows redirects
+- **THEN** the proxy forwards the body unchanged to the same canonical upstream operation
+
+#### Scenario: Invalid body is rejected in the native error envelope
+
+- **WHEN** a client posts invalid JSON or a non-object body to a supported native route
+- **THEN** the proxy returns `400` with `error.code` and `error.type` equal to `invalid_request_error`
+- **AND** it does not send an upstream request
+
+#### Scenario: Native ownership has a documented observation source
+
+- **WHEN** an affinity observation classifies a hard native history session
+- **THEN** its source is `history_session`
+- **AND** that value belongs to the documented affinity source domain
