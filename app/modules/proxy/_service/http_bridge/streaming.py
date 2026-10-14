@@ -4515,16 +4515,12 @@ class _HTTPBridgeStreamingMixin:
             selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None,
         ) -> None:
             if selection is None:
-                consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
-                    session,
-                    detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                )
-            else:
-                consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                    session,
-                    detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                    selection=selection,
-                )
+                selection = _http_bridge_retry_circuit_attempt_selection_for_pending_requests((request_state,))
+            consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                session,
+                detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                selection=selection,
+            )
             observed_response_events = max(
                 request_state.response_event_count,
                 int(

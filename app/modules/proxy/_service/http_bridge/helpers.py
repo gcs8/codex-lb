@@ -139,6 +139,7 @@ from app.modules.proxy._service.support import (
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
+    _HTTPBridgeRetryCircuitProbeClaim,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -1406,9 +1407,16 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
             if not any(candidate is attempt for candidate in unique_attempts):
                 unique_attempts.append(attempt)
         if unique_attempts:
+            probe_claim = None
+            if len(unique_attempts) == 1:
+                for request_state in request_states:
+                    if getattr(request_state, "response_create_attempt", None) is unique_attempts[0]:
+                        probe_claim = _HTTPBridgeRetryCircuitProbeClaim.capture(request_state)
+                        break
             return _HTTPBridgeRetryCircuitAttemptSelection(
                 kind=kind,
                 attempts=tuple(unique_attempts),
+                probe_claim=probe_claim,
             )
     return _HTTPBridgeRetryCircuitAttemptSelection(kind="ineligible" if attempt_seen else "absent")
 

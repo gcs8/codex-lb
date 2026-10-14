@@ -977,9 +977,30 @@ class _HTTPBridgeResponseCreateAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitProbeClaim:
+    owner: object
+    episode: tuple[float, int, int, int]
+
+    @classmethod
+    def capture(cls, owner: object | None) -> _HTTPBridgeRetryCircuitProbeClaim | None:
+        episode = getattr(owner, "claimed_half_open_episode", None)
+        generation = getattr(owner, "claimed_half_open_generation", 0)
+        if (
+            owner is None
+            or not isinstance(episode, tuple)
+            or len(episode) != 3
+            or not isinstance(generation, int)
+            or generation <= 0
+        ):
+            return None
+        return cls(owner=owner, episode=(episode[0], episode[1], episode[2], generation))
+
+
+@dataclass(frozen=True, slots=True)
 class _HTTPBridgeRetryCircuitAttemptSelection:
     kind: Literal["absent", "eligible", "recorded", "settled", "ineligible"]
     attempts: tuple[_HTTPBridgeResponseCreateAttempt, ...] = ()
+    probe_claim: _HTTPBridgeRetryCircuitProbeClaim | None = None
 
     def __post_init__(self) -> None:
         carries_attempts = self.kind in {"eligible", "recorded", "settled"}
@@ -1153,6 +1174,13 @@ class _WebSocketRequestState:
     # it claimed none); released by the submit finalizer whenever the probe
     # was never dispatched, so no pre-dispatch exit can strand the lease.
     claimed_half_open_until: float = 0.0
+    # Process-local lease generation paired with ``claimed_half_open_until``;
+    # a reused request/session token must not return a later probe.
+    claimed_half_open_generation: int = 0
+    # Durable retry-circuit episode observed when this request claimed the
+    # process-local half-open probe. A completion uses it to avoid settling a
+    # replacement probe that reused the same hard key.
+    claimed_half_open_episode: tuple[float, int, int] | None = None
     # True while the submit owns an admission-waiter registration taken at
     # submit entry, before the retry-circuit gate, that the dispatch path has
     # not yet taken over. It keeps the turn visible to a concurrent
@@ -1685,6 +1713,20 @@ def _mark_response_create_attempt_observed(
         attempt.response_observed = True
         if event_type not in {"response.failed", "response.incomplete"}:
             attempt.non_terminal_response_observed = True
+
+
+def _disarm_response_create_attempt(request_state: _WebSocketRequestState | None) -> None:
+    if request_state is None:
+        return
+    attempt = request_state.response_create_attempt
+    if attempt is not None:
+        attempt.disarmed = True
+
+
+async def _disarm_pending_response_create_attempts(session: _HTTPBridgeSession) -> None:
+    async with session.pending_lock:
+        for request_state in session.pending_requests:
+            _disarm_response_create_attempt(request_state)
 
 
 def _record_response_event(
