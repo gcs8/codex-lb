@@ -1088,7 +1088,9 @@ async def test_native_history_notes_trailing_slash_preserves_canonical_routing(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [b"{", b"[]", b"null", b"\xff"])
-async def test_native_history_notes_invalid_body_has_openai_error_envelope(async_client, monkeypatch, body: bytes) -> None:
+async def test_native_history_notes_invalid_body_has_openai_error_envelope(
+    async_client, monkeypatch, body: bytes
+) -> None:
     async def unexpected_control(*_args, **_kwargs):
         pytest.fail("invalid native body must not reach upstream")
 
@@ -1103,6 +1105,28 @@ async def test_native_history_notes_invalid_body_has_openai_error_envelope(async
     assert error["type"] == "invalid_request_error"
     assert error["code"] == "invalid_request_error"
     assert error["message"].startswith("native history and notes payload must be ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_path", _NATIVE_HISTORY_NOTES_ROUTES)
+@pytest.mark.parametrize("suffix", ["", "/"])
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-native-key"])
+async def test_native_history_notes_authenticates_before_body_parsing(
+    async_client, monkeypatch, upstream_path: str, suffix: str, authorization: str | None
+) -> None:
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+
+    async def unexpected_control(*_args, **_kwargs):
+        pytest.fail("unauthenticated native operation must not reach upstream")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_control)
+    headers = {"content-type": "application/json"}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    response = await async_client.post(f"/backend-api/codex/{upstream_path}{suffix}", content=b"{", headers=headers)
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio
@@ -1144,6 +1168,8 @@ async def test_native_history_notes_respects_api_key_account_assignment(async_cl
     )
     assert key_response.status_code == 200
     key = key_response.json()
+    auth_enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert auth_enabled.status_code == 200
     calls: list[str] = []
 
     async def fake_control(_path, *, account_id, **_kwargs):
@@ -1159,9 +1185,7 @@ async def test_native_history_notes_respects_api_key_account_assignment(async_cl
     )
     assert first.status_code == 200, first.text
     assert calls == ["acc_history_scope_owner"]
-    updated = await async_client.patch(
-        f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [other_id]}
-    )
+    updated = await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [other_id]})
     assert updated.status_code == 200
     from app.core.config.settings import get_settings
 

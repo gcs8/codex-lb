@@ -108,15 +108,15 @@ for payload validation and error shape.
 
 ### Requirement: Native route compatibility and affinity observations stay consistent
 
-Native history and notes routes MUST preserve the canonical upstream path and
-request body when a client follows a trailing-slash redirect. Invalid JSON or
+Native history and notes routes MUST expose equivalent authenticated trailing-slash
+paths and preserve the canonical upstream path and request body. Invalid JSON or
 non-object request bodies MUST return the existing OpenAI-compatible invalid
 request error envelope. The documented affinity observation source domain MUST
 include `history_session` whenever the classifier emits it.
 
 #### Scenario: Trailing slash reaches the same native operation
 
-- **WHEN** a client posts a supported native route with a trailing slash and follows redirects
+- **WHEN** a client posts a supported native route with a trailing slash
 - **THEN** the proxy forwards the body unchanged to the same canonical upstream operation
 
 #### Scenario: Invalid body is rejected in the native error envelope

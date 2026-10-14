@@ -1177,21 +1177,32 @@ async def codex_alpha_search(
 
 
 @router.post("/alpha/history/v2/list_windows")
+@router.post("/alpha/history/v2/list_windows/", include_in_schema=False)
 @router.post("/alpha/history/v2/list_items")
+@router.post("/alpha/history/v2/list_items/", include_in_schema=False)
 @router.post("/alpha/history/v2/read_item")
+@router.post("/alpha/history/v2/read_item/", include_in_schema=False)
 @router.post("/alpha/history/v2/search_contents")
+@router.post("/alpha/history/v2/search_contents/", include_in_schema=False)
 @router.post("/alpha/notes/v2/thread_hint")
+@router.post("/alpha/notes/v2/thread_hint/", include_in_schema=False)
 @router.post("/alpha/notes/v2/list_files_by_prefix")
+@router.post("/alpha/notes/v2/list_files_by_prefix/", include_in_schema=False)
 @router.post("/alpha/notes/v2/read_file")
+@router.post("/alpha/notes/v2/read_file/", include_in_schema=False)
 @router.post("/alpha/notes/v2/search_contents")
+@router.post("/alpha/notes/v2/search_contents/", include_in_schema=False)
 @router.post("/alpha/notes/v2/append_to_file")
+@router.post("/alpha/notes/v2/append_to_file/", include_in_schema=False)
 @router.post("/alpha/notes/v2/write_file")
+@router.post("/alpha/notes/v2/write_file/", include_in_schema=False)
 async def codex_native_history_notes(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, request.url.path.removeprefix("/backend-api/codex/"), context, api_key)
+    path = request.url.path.removeprefix("/backend-api/codex/").rstrip("/")
+    return await _codex_control_proxy(request, path, context, api_key)
 
 
 @router.get("/agent-identities/jwks")

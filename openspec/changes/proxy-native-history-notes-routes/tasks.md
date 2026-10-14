@@ -23,3 +23,6 @@
       native calls fail closed without replacing the stored owner.
 - [x] 2.3 Run focused route, control, affinity, and selection tests plus Ruff,
       ty, and strict OpenSpec validation.
+- [x] 2.4 Cover equivalent trailing-slash routes, invalid-body error envelopes,
+      auth-before-parsing, and API-key scope reassignment with retained ownership.
+- [x] 2.5 Keep the affinity observation source domain complete for history sessions.

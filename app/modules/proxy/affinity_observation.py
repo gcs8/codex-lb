@@ -16,6 +16,7 @@ AFFINITY_SOURCES: tuple[str, ...] = (
     "turn_state_header",
     "generated_turn_state",
     "session_header",
+    "history_session",
     "payload",
     "derived",
     "none",
