@@ -5203,7 +5203,7 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 ):
     from app.core.middleware import request_id as request_id_middleware_module
     from app.modules.proxy import api as proxy_api_module
-    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_request
 
     owner_settings = _make_app_settings(
         enabled=True,
@@ -5351,7 +5351,8 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
         original_affinity_kind=canonical_key.affinity_kind,
         original_affinity_key=canonical_key.affinity_key,
     )
-    forward_headers = build_owner_forward_headers(
+    owner_request = build_owner_forward_request(
+        body=priority_payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={"x-request-id": "forwarded-priority-request"},
         payload=priority_payload,
         context=forward_context,
@@ -5369,8 +5370,8 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 
         priority_response = await async_client.post(
             "/internal/bridge/responses",
-            json=priority_payload.model_dump_for_forwarding(),
-            headers=forward_headers,
+            json=owner_request.body,
+            headers=owner_request.headers,
         )
 
         assert priority_response.status_code == 200, priority_response.text
@@ -5398,7 +5399,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
 ):
     from app.modules.proxy import api as proxy_api_module
     from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
-    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_request
 
     target_settings = _make_app_settings(enabled=True, instance_id="instance-b")
     _install_proxy_settings(
@@ -5512,7 +5513,8 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
         original_affinity_kind=recovery_kind,
         original_affinity_key=recovery_key,
     )
-    forward_headers = build_owner_forward_headers(
+    owner_request = build_owner_forward_request(
+        body=payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={
             "session_id": "stale-session",
             "session-id": "stale-session-dash",
@@ -5529,8 +5531,8 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     response = await asyncio.wait_for(
         async_client.post(
             "/internal/bridge/responses",
-            json=payload.model_dump_for_forwarding(),
-            headers=forward_headers,
+            json=owner_request.body,
+            headers=owner_request.headers,
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
