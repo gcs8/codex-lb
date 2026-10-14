@@ -9,3 +9,7 @@ The integration regression imports a synthetic account through `/api/accounts/im
 The attempted unkeyed owner-rewrite matrix is not evidence for this post-terminal bug: its health write occurs before terminal delivery. An unkeyed native later-event failure in the tested setup forwards without attempting a health penalty. Those paths are excluded from the regression matrix and unchanged.
 
 The fix wraps six existing post-terminal error-health calls only. It leaves pre-terminal retry/admission decisions, settlement errors, success writes, and cancellation propagation unchanged. No dependency on PR #1905 or another unmerged change is introduced.
+
+## Fork lane composition
+
+On the packet base, two wrapped callers also carry `upstream_http_status` as evidence-only provenance. The helper preserves that keyword separately from `http_status`, so an HTTP-derived error does not enter the status-less soft-overload window. A keyed regression exercises both HTTP 500 and status-less failures, each with normal completion and downstream close. It requires settlement before the health attempt, one original terminal, exception logging, and drained cleanup tasks. These composition checks do not change pre-terminal retry policy.

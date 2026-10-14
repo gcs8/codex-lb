@@ -10911,4 +10911,3 @@ After publishing a terminal Responses event, the proxy MUST log ordinary failure
 - **WHEN** a keyed continuation fails and its account-error health write raises after reservation settlement
 - **THEN** settlement completes before the health write is attempted
 - **AND** the client receives only the intended owner-unavailable terminal response
-

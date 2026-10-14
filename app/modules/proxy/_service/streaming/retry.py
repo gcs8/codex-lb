@@ -824,9 +824,14 @@ class _StreamingRetryMixin:
             code: str,
             *,
             http_status: int | None = None,
+            upstream_http_status: int | None = None,
         ) -> None:
             try:
-                if http_status is None:
+                if upstream_http_status is not None:
+                    await proxy._handle_stream_error(
+                        account, error, code, http_status=http_status, upstream_http_status=upstream_http_status
+                    )
+                elif http_status is None:
                     await proxy._handle_stream_error(account, error, code)
                 else:
                     await proxy._handle_stream_error(account, error, code, http_status=http_status)
