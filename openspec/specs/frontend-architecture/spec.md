@@ -4247,6 +4247,13 @@ The Accounts page SHALL display Dashboard-style donut charts by plan and account
 - **WHEN** the loaded inventory changes after an import, deletion or status update
 - **THEN** both charts reflect the latest data
 
+#### Scenario: Scoped inventory and response status semantics
+
+- **WHEN** the Accounts API returns an authorization-scoped or otherwise restricted inventory
+- **THEN** both distribution totals and category shares SHALL use only that returned inventory
+- **AND** list searches SHALL NOT change the returned inventory used by the charts
+- **AND** the status distribution SHALL count each returned account status without inferring a different status from quota percentages or routing eligibility
+
 ### Requirement: Account distribution presentation states
 
 Account distribution charts SHALL use localized labels, readable textual counts and percentages, and keyboard-focusable legends. They SHALL fit desktop and mobile widths in light and dark themes. Initial loading and failed requests without account data SHALL NOT present a successful empty inventory. A successfully loaded empty inventory SHALL display a zero total, neutral rings and an empty-state label without invented categories or invalid percentages.

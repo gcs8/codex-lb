@@ -1,11 +1,49 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { createAccountSummary } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 describe("accounts flow integration", () => {
+  it("derives distributions only from the scoped API inventory and preserves response statuses", async () => {
+    const user = userEvent.setup({ delay: null });
+    server.use(http.get("/api/accounts", () => HttpResponse.json({
+      accounts: [
+        createAccountSummary({
+          accountId: "visible-pro", email: "visible-pro@example.com", planType: "pro",
+          status: "paused", usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 100 },
+        }),
+        createAccountSummary({
+          accountId: "visible-custom", email: "visible-custom@example.com", planType: "future_plan",
+          status: "active", usage: { primaryRemainingPercent: 0, secondaryRemainingPercent: 0 },
+        }),
+      ],
+    })));
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+
+    const plans = within(await screen.findByRole("region", { name: "Accounts by plan" }));
+    const statuses = within(screen.getByRole("region", { name: "Accounts by status" }));
+    expect(plans.getByTestId("donut-center-total")).toHaveTextContent(/^2$/);
+    expect(plans.getByRole("button", { name: "pro 1 (50%)" })).toBeInTheDocument();
+    expect(plans.getByRole("button", { name: "future_plan 1 (50%)" })).toBeInTheDocument();
+    expect(plans.getAllByRole("button")).toHaveLength(2);
+    expect(statuses.getByRole("button", { name: "Active 1 (50%)" })).toBeInTheDocument();
+    expect(statuses.getByRole("button", { name: "Paused 1 (50%)" })).toBeInTheDocument();
+    expect(statuses.getAllByRole("button")).toHaveLength(2);
+    expect(screen.queryByText("primary@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("secondary@example.com")).not.toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "not-in-this-scope");
+    expect(screen.getByText("No matching accounts")).toBeInTheDocument();
+    expect(plans.getByTestId("donut-center-total")).toHaveTextContent(/^2$/);
+    expect(statuses.getByTestId("donut-center-total")).toHaveTextContent(/^2$/);
+  });
+
   it("supports account selection and pause/resume actions", async () => {
     const user = userEvent.setup({ delay: null });
 
