@@ -26,7 +26,7 @@ from fastapi import (
     Security,
     WebSocket,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1753,6 +1753,22 @@ async def v1_models(
     if request.query_params.get("client_version"):
         return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
+
+
+@v1_router.get("/models/", response_model=None, include_in_schema=False)
+async def v1_models_trailing_slash(request: Request) -> Response:
+    # The greedy model-id route would otherwise consume the list's empty suffix.
+    return RedirectResponse(str(request.url.replace(path=request.url.path.removesuffix("/"))), status_code=307)
+
+
+@v1_router.get("/models/{model_id:path}", response_model=None)
+async def v1_model_retrieve(
+    model_id: str,
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    # OpenAI-compatible single-model lookup (e.g. Visual Studio Copilot's model
+    # validation probe). Always the OpenAI `model` object, never the Codex catalog.
+    return await _build_model_retrieve_response(api_key, model_id)
 
 
 @v1_router.get("/usage", response_model=V1UsageResponse)
@@ -4043,7 +4059,35 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 async def _build_models_response_body(
     api_key: ApiKeyData | None,
 ) -> Response:
+    items = await _visible_model_list_items(api_key)
+    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
 
+
+async def _build_model_retrieve_response(api_key: ApiKeyData | None, model_id: str) -> Response:
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=None,
+        request_service_tier=None,
+    )
+    try:
+        items = await _visible_model_list_items(api_key)
+        item = next((candidate for candidate in items if candidate.id == model_id), None)
+        if item is None:
+            return JSONResponse(
+                status_code=404,
+                content=openai_error(
+                    "model_not_found",
+                    f"The model '{model_id}' does not exist",
+                    error_type="invalid_request_error",
+                ),
+            )
+        return JSONResponse(content=_dump_v1_model_item(item))
+    finally:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+
+
+async def _visible_model_list_items(api_key: ApiKeyData | None) -> list[ModelListItem]:
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     created = int(time.time())
@@ -4052,9 +4096,6 @@ async def _build_models_response_body(
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
     source_models = await _list_enabled_source_catalog_models(api_key)
-
-    if not models and not source_models:
-        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
     seen_slugs: set[str] = set()
@@ -4077,7 +4118,7 @@ async def _build_models_response_body(
             _to_model_list_item(model.slug, model, created=created, context_window_overrides=context_window_overrides)
         )
         seen_slugs.add(model.slug)
-    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+    return items
 
 
 async def _list_enabled_source_catalog_models(
@@ -4102,13 +4143,24 @@ async def _list_enabled_source_catalog_models(
 def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
     payload = response.model_dump(mode="json")
     for item in payload["data"]:
-        metadata = item.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
-            if metadata.get(key) is None:
-                metadata.pop(key, None)
+        _drop_unset_tier_metadata(item)
     return payload
+
+
+def _dump_v1_model_item(item: ModelListItem) -> dict[str, JsonValue]:
+    # Same shape as the item's entry in `_dump_v1_models_response`.
+    payload = item.model_dump(mode="json")
+    _drop_unset_tier_metadata(payload)
+    return payload
+
+
+def _drop_unset_tier_metadata(item: dict[str, JsonValue]) -> None:
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+        if metadata.get(key) is None:
+            metadata.pop(key, None)
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
