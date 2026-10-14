@@ -42,15 +42,15 @@ describe("dashboard flow integration", () => {
     }))));
     window.history.pushState({}, "", "/dashboard?overviewTimeframe=30d&retained=context");
     renderWithProviders(<App />);
-    expect(await screen.findByRole("heading", { name: "Dashboard", exact: true })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Dashboard$/ })).toBeInTheDocument();
     const enter = await screen.findByRole("button", { name: "View accounts full screen" });
     await user.click(enter);
     await waitFor(() => expect(new URLSearchParams(window.location.search).get("accountsFullscreen")).toBe("1"));
     expect(new URLSearchParams(window.location.search).get("overviewTimeframe")).toBe("30d");
     expect(new URLSearchParams(window.location.search).get("retained")).toBe("context");
-    expect(screen.getByRole("region", { name: "Accounts", exact: true })).toHaveTextContent("Fullscreen Account");
+    expect(screen.getByRole("region", { name: /^Accounts$/ })).toHaveTextContent("Fullscreen Account");
     expect(screen.queryByRole("heading", { name: "Request Logs" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Dashboard", exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Dashboard$/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Exit full screen" }));
     await waitFor(() => expect(new URLSearchParams(window.location.search).has("accountsFullscreen")).toBe(false));
     expect(new URLSearchParams(window.location.search).get("retained")).toBe("context");

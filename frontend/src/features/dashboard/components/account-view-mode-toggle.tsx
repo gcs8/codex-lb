@@ -28,7 +28,7 @@ export function AccountViewModeToggle({ value, onChange, fullscreen, onFullscree
         role="radiogroup"
         aria-label={t("dashboard.accounts.viewMode")}
       >
-        {OPTIONS.map((option) => {
+        {OPTIONS.map((option, index) => {
           const Icon = option.icon;
           const selected = value === option.value;
           const label = t(option.labelKey);
@@ -40,9 +40,20 @@ export function AccountViewModeToggle({ value, onChange, fullscreen, onFullscree
               aria-checked={selected}
               aria-label={label}
               title={label}
+              tabIndex={selected ? 0 : -1}
               onClick={() => onChange(option.value)}
+              onKeyDown={(event) => {
+                const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+                  ? 1
+                  : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+                if (!direction) return;
+                event.preventDefault();
+                const nextIndex = (index + direction + OPTIONS.length) % OPTIONS.length;
+                onChange(OPTIONS[nextIndex].value);
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex]?.focus();
+              }}
               className={cn(
-                "inline-flex h-6 w-7 items-center justify-center rounded-[5px] text-muted-foreground transition-colors",
+                "inline-flex h-6 w-7 items-center justify-center rounded-[5px] text-muted-foreground transition-colors focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                 selected
                   ? "bg-accent text-accent-foreground shadow-sm"
                   : "hover:bg-accent/60 hover:text-accent-foreground",
@@ -56,11 +67,11 @@ export function AccountViewModeToggle({ value, onChange, fullscreen, onFullscree
       <button
         type="button"
         aria-pressed={fullscreen}
-        aria-label={t("dashboard.accounts.viewFullscreen")}
+        aria-label={t(fullscreen ? "dashboard.accounts.exitFullscreen" : "dashboard.accounts.viewFullscreen")}
         title={t(fullscreen ? "dashboard.accounts.exitFullscreen" : "dashboard.accounts.viewFullscreen")}
         onClick={() => onFullscreenChange(!fullscreen)}
         className={cn(
-          "inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors",
+          "inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
           fullscreen
             ? "bg-accent text-accent-foreground shadow-sm"
             : "bg-background text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground",

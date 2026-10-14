@@ -415,7 +415,8 @@ export function DashboardPage() {
   return (
     <div className={fullscreenAccounts ? "flex min-h-0 flex-1 flex-col gap-4" : "animate-fade-in-up space-y-8"}>
       {/* Page header */}
-      <div className={cn("flex-wrap items-start justify-between gap-3", fullscreenAccounts && view ? "hidden" : "flex shrink-0")}>
+      {!(fullscreenAccounts && view) ? (
+      <div className="flex shrink-0 flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t("dashboard.page.title")}</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -455,7 +456,7 @@ export function DashboardPage() {
           </button>
         </div>
       </div>
-
+      ) : null}
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
       {(dashboardQuery.isPending || dashboardQuery.isFetching) &&

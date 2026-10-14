@@ -398,7 +398,8 @@ export function AccountList({
                   >
                     <button
                       type="button"
-                      className="min-w-0 text-left hover:underline"
+                      className="min-w-0 rounded-sm text-left hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+                      aria-label={t("dashboard.accountList.viewDetailsAria", { account: accountTitle(account) })}
                       onClick={() => onAction?.(account, "details")}
                     >
                       <span className={cn("block truncate font-medium", blurred && "privacy-blur")}>
