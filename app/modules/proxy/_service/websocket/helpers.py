@@ -752,6 +752,7 @@ _WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
     "custom_tool_call_output": "custom_tool_call",
     "apply_patch_call_output": "apply_patch_call",
+    "tool_search_output": "tool_search_call",
 }
 _WEBSOCKET_TOOL_CALL_ITEM_TYPES = frozenset(_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.values())
 
@@ -789,6 +790,15 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
         return False
     if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
         return False
+    if continuity_state is not None and continuity_state.empty_prewarm_response_id == previous_response_id:
+        # Codex chains its first turn to an empty prewarm and sends only the
+        # new items, so dropping the anchor would drop the tools and developer
+        # context that only the prewarm carried.
+        return _facade()._input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.empty_prewarm_input_count,
+            stored_fingerprint=continuity_state.empty_prewarm_input_fingerprint,
+        )
     if (
         continuity_state is not None
         and continuity_state.last_completed_response_id == previous_response_id
@@ -831,6 +841,24 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
     continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
+
+
+def _record_websocket_empty_prewarm_completion(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+    response_id: str | None,
+) -> None:
+    """Record the context of an empty prewarm without treating it as turn progress."""
+    # A replayed prewarm keeps exposing its original id to the client, so the
+    # turn chained to it references that id, never the hidden upstream one.
+    continuity_state.empty_prewarm_response_id = request_state.replay_downstream_response_id or response_id
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.empty_prewarm_input_count = request_state.input_item_count
+        continuity_state.empty_prewarm_input_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.empty_prewarm_input_count = 0
+        continuity_state.empty_prewarm_input_fingerprint = None
 
 
 def _record_websocket_responses_lite_acceptance(
@@ -2317,32 +2345,51 @@ def _serialize_websocket_error_event(payload: dict[str, JsonValue]) -> str:
 
 
 def _trim_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    replay_safe_input_items = _sanitize_websocket_previous_response_input_items(input_items)
     first_output_index = next(
         (
             index
             for index, item in enumerate(input_items)
             if _websocket_input_item_type(item)
-            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+            in {"function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output"}
         ),
         None,
     )
-    if first_output_index is None or first_output_index == 0:
-        return input_items
+    if first_output_index is None:
+        return replay_safe_input_items
+    if first_output_index == 0:
+        return replay_safe_input_items
     prefix = input_items[:first_output_index]
     if not all(_is_websocket_previous_response_output_item(item) for item in prefix):
-        return input_items
-    return input_items[first_output_index:]
+        return replay_safe_input_items
+    return replay_safe_input_items[first_output_index:]
+
+
+def _sanitize_websocket_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    return [_strip_websocket_replayed_tool_search_id(item) for item in input_items]
 
 
 def _is_websocket_previous_response_output_item(item: JsonValue) -> bool:
     if isinstance(item, dict) and _websocket_input_item_type(item) is None and item.get("role") == "assistant":
         return True
     item_type = _websocket_input_item_type(item)
-    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call"}:
+    if item_type in {"reasoning", "function_call", "custom_tool_call", "apply_patch_call", "tool_search_call"}:
         return True
     if item_type != "message" or not isinstance(item, dict):
         return False
     return item.get("role") == "assistant"
+
+
+def _strip_websocket_replayed_tool_search_id(item: JsonValue) -> JsonValue:
+    if (
+        not isinstance(item, dict)
+        or _websocket_input_item_type(item) not in {"tool_search_call", "tool_search_output"}
+        or "id" not in item
+    ):
+        return item
+    stripped = dict(item)
+    stripped.pop("id", None)
+    return stripped
 
 
 def _websocket_input_item_type(item: JsonValue) -> str | None:
