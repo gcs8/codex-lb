@@ -622,17 +622,57 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
 
 @pytest.mark.asyncio
 async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    import socket
+
+    import app.modules.accounts.auth_manager as auth_manager_module
+    from app.core.auth.refresh import RefreshError, TokenRefreshResult
+
+    network_attempts: list[str] = []
+
+    def deny_network(*args, **kwargs):
+        del args, kwargs
+        network_attempts.append("unexpected network I/O")
+        raise AssertionError("This in-process ASGI fixture must not use the network")
+
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
+    monkeypatch.setattr(socket.socket, "sendto", deny_network)
+    # Prove DNS and direct-connect denial without attempting actual egress.
+    with pytest.raises(AssertionError, match="must not use the network"):
+        socket.getaddrinfo("auth.openai.com", 443)
+    with socket.socket() as client:
+        with pytest.raises(AssertionError, match="must not use the network"):
+            client.connect(("192.0.2.1", 443))
+    assert len(network_attempts) == 2
+    network_attempts.clear()
+
+    refresh_account_ids: dict[str, str] = {}
     for raw_account_id, email in (
         ("acc_stream_invalidated_a", "stream-invalidated-a@example.com"),
         ("acc_stream_invalidated_b", "stream-invalidated-b@example.com"),
     ):
         auth_json = _make_auth_json(raw_account_id, email)
+        refresh_token = f"refresh-token-{raw_account_id}"
+        auth_json["tokens"]["refreshToken"] = refresh_token
+        refresh_account_ids[refresh_token] = raw_account_id
         files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
         response = await async_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
 
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
+    refreshed_account_ids: list[str] = []
+
+    async def fake_refresh(refresh_token: str, **kwargs: object) -> TokenRefreshResult:
+        assert kwargs == {"route": None, "allow_direct_egress": True}
+        account_id = refresh_account_ids[refresh_token]
+        assert captured_account_ids == [account_id]
+        assert account_id == invalidated_account_id
+        refreshed_account_ids.append(account_id)
+        # The original assertions require the second stream to use a different
+        # account. A successful refresh would retry the rejected account first.
+        raise RefreshError("refresh_token_reused", "refresh token reused", True)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del payload, headers, access_token, base_url, raise_for_status, kwargs
@@ -651,6 +691,7 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
 
     async with async_client.stream(
         "POST",
@@ -665,6 +706,10 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
     assert captured_account_ids[1] != invalidated_account_id
+    assert len(captured_account_ids) == 2
+    assert set(captured_account_ids) == set(refresh_account_ids.values())
+    assert refreshed_account_ids == [invalidated_account_id]
+    assert network_attempts == []
 
 
 @pytest.mark.asyncio
