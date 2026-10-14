@@ -328,3 +328,8 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Health persistence after a terminal response
+
+A failed account-error health write must not replace a Responses terminal that the client already received. For example, a quota failure followed by a database error must retain the original quota terminal and log the health failure. The retry loop contains ordinary post-terminal health exceptions after reservation settlement; it preserves cancellation and pre-terminal retry decisions. Issue #2033 has both a public `/v1/responses` regression and stream-handler coverage for keyed owner continuations. The implementation and excluded pre-terminal setups are recorded in `openspec/changes/archive/2026-09-10-fix-post-terminal-health-failures/context.md`.
+
