@@ -10776,6 +10776,26 @@ Metrics SHALL NOT label raw request, conversation, session, account or API-key i
 - **THEN** its routing diagnostics distinguish that reason
 - **AND** admission counters MUST NOT be represented as successful WS connections
 
+### Requirement: HTTP bridge counts explicit incomplete transport reasons
+
+For an otherwise eligible pre-response HTTP-bridge attempt, the proxy MUST account a `response.incomplete` terminal with `incomplete_details.reason` equal to `stream_incomplete` and no explicit response error as one retry-circuit failure. It MUST apply existing duplicate and eligibility guards. An explicit response error MUST retain precedence. Neutral, unknown and missing reasons MUST NOT become transport failures. Downstream terminal payloads, request-log classification and account-health treatment MUST remain unchanged.
+
+#### Scenario: Reason-only stream failure
+- **WHEN** an eligible HTTP-bridge attempt receives a reason-only `stream_incomplete` terminal through either raw or interpreted upstream input
+- **THEN** one retry-circuit failure is recorded
+- **AND** repeating its terminal does not add another failure
+- **AND** its downstream payload and account-health treatment remain unchanged
+
+#### Scenario: Neutral reasons and explicit errors
+- **WHEN** an incomplete terminal contains a neutral, unknown or missing reason, or an explicit response error
+- **THEN** the existing explicit-error classification takes precedence when present
+- **AND** the reason alone does not introduce a transport failure unless it is exactly `stream_incomplete`
+- **AND** the request-log classification remains unchanged
+
+#### Scenario: Existing attempt exclusions
+- **WHEN** a reason-only stream failure belongs to an attempt excluded by existing circuit eligibility or duplicate guards
+- **THEN** the terminal does not add a circuit failure
+
 ### Requirement: Observed HTTP response IDs publish same-process ownership before delivery
 
 When an HTTP Responses attempt extracts a valid response ID from an actual upstream lifecycle event, it MUST publish that ID to the existing bounded process owner cache with the selected account and existing API-key/session scope before delivering the event that exposes the ID downstream. An immediate same-process follow-up referencing that ID MUST be able to resolve its known owner without waiting for the originating request-log write or originating stream completion. This readiness MUST apply from the first observed lifecycle event carrying the ID, including `response.created`, `response.queued`, and `response.in_progress`, whether delivered as SSE or adapted from a canonical background JSON acknowledgement; it MUST NOT promise that an unfinished response is already usable by the upstream provider.
