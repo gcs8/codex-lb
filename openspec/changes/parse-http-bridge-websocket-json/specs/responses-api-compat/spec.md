@@ -3,7 +3,7 @@
 ### Requirement: HTTP bridge parses complete WebSocket JSON documents
 
 The HTTP Responses bridge MUST interpret upstream text messages as complete
-JSON objects, independent of indentation, LF/CRLF formatting, or surrounding
+JSON objects, independent of indentation, LF/CRLF/CR formatting, or surrounding
 JSON whitespace. Native-interpreted and opaque frames MUST have equivalent
 classification and correlation. Conversion to SSE MUST retain a complete valid
 JSON object. Actual HTTP SSE parsing MUST remain unchanged.
