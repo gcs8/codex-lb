@@ -18445,8 +18445,11 @@ async def test_stream_responses_route_health_failure_keeps_one_terminal(
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        *,
+        upstream_http_status: int | None = None,
     ) -> object:
         del error, http_status
+        assert upstream_http_status == (429 if not keyed and upstream_path == "proxy_response_error" else None)
         assert failed_account is account
         order.append(f"health:{code}")
         raise RuntimeError("injected post-terminal health write failure")
