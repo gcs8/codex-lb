@@ -9635,7 +9635,6 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
             "model": "gpt-5.6-sol",
             "instructions": "",
             "input": [additional_tools, {"role": "user", "content": "inspect"}],
-            "parallel_tool_calls": True,
             "client_metadata": {
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
@@ -9669,7 +9668,6 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
     upstream_headers = cast(dict[str, str], session.post_calls[0]["headers"])
     assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
     upstream_payload = cast(dict[str, object], session.post_calls[0]["json"])
-    assert upstream_payload["parallel_tool_calls"] is False
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert upstream_payload["client_metadata"] == {
         "keep": "yes",
@@ -9719,7 +9717,6 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
             "model": "gpt-5.6-sol",
             "instructions": "hi",
             "input": [additional_tools, {"role": "user", "content": "hi"}],
-            "parallel_tool_calls": True,
             "client_metadata": {
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
@@ -9755,7 +9752,6 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
         "effort": "high",
         "vendor_hint": 7,
     }
-    expected_request_payload["parallel_tool_calls"] = False
     assert request_payload == expected_request_payload
     assert "context" not in cast(Mapping[str, JsonValue], payload.to_payload()["reasoning"])
     upstream_headers = cast(dict[str, str], session.ws_calls[0]["headers"])
@@ -12736,7 +12732,6 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
     assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
     upstream_payload = cast(dict[str, object], session.calls[0]["json"])
-    assert upstream_payload["parallel_tool_calls"] is False
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert cast(list[object], upstream_payload["input"])[1] == developer_instructions
     assert upstream_payload["reasoning"] == {
