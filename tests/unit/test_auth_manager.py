@@ -30,6 +30,105 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
+async def test_refresh_account_converts_upstream_route_failure_to_refresh_error(monkeypatch):
+    @asynccontextmanager
+    async def fake_background_session() -> AsyncIterator[object]:
+        yield object()
+
+    async def fail_resolve_route(*_args: object, **_kwargs: object) -> None:
+        raise UpstreamProxyRouteError("pool_unavailable", account_id="acc_route")
+
+    async def unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise AssertionError("refresh_access_token should not run when route resolution fails")
+
+    monkeypatch.setattr(auth_manager_module, "get_background_session", fake_background_session)
+    monkeypatch.setattr(auth_manager_module, "resolve_upstream_route", fail_resolve_route)
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", unexpected_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_route",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await manager.refresh_account(account)
+
+    assert exc_info.value.code == "upstream_proxy_unavailable"
+    assert exc_info.value.message == "Upstream proxy route unavailable: pool_unavailable"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    assert exc_info.value.upstream_proxy_fail_closed_reason == "pool_unavailable"
+    assert repo.status_payload is None
+    assert repo.tokens_payload is None
+
+
+@pytest.mark.asyncio
+async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
+    """Regression: the shielded singleflight body outlives a cancelled caller,
+    so a foreign refresh claim must not keep it polling for the full
+    fixed claim wait (``_TOKEN_REFRESH_CLAIM_WAIT_SECONDS``, 8s) when the caller's
+    remaining request budget is far smaller."""
+
+    class _ForeignClaims:
+        claimant_id = "this-replica"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
+            return False
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del account_id, owner
+
+    async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise AssertionError("no upstream exchange may run while a foreign claim is held")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_claim_budget_cap",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=_ForeignClaims())
+
+    # The proxy request path pushes its remaining budget as the refresh
+    # timeout override; the claim wait must be capped by it (0.05s), not run
+    # for the configured claim wait (8s default).
+    override_token = push_token_refresh_timeout_override(0.05)
+    try:
+        started = time.monotonic()
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.ensure_fresh(account, force=True)
+        elapsed = time.monotonic() - started
+    finally:
+        pop_token_refresh_timeout_override(override_token)
+
+    assert exc_info.value.code == "refresh_claim_timeout"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("private_first", [True, False])
 @pytest.mark.parametrize(
     ("code", "permanent", "transport", "expected_code"),
@@ -2742,7 +2841,7 @@ async def test_permanent_failure_status_cas_exhaustion_surfaces_transient_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("acquired_after_budget", [False, True])
-async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch, caplog, acquired_after_budget):
+async def test_claim_wait_failure_diagnostic_is_secret_safe(monkeypatch, caplog, acquired_after_budget):
     """Regression: the shielded singleflight body outlives a cancelled caller,
     so a foreign refresh claim must not keep it polling for the full
     fixed claim wait (``_TOKEN_REFRESH_CLAIM_WAIT_SECONDS``, 8s) when the caller's
