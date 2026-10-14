@@ -43,3 +43,12 @@ Port #2519's distinct regression coverage to the retained parser and bridge:
 
 The lifecycle parser-spy and native parity adaptations overlap and remain the
 #2530 versions. Original HTTP SSE tests and their assertions are unchanged.
+
+## Current-base framing compatibility
+
+The current-base tool-call deduplication can mutate completed item payloads in
+place. Keep `response.output_item.done` on the re-serialization path during both
+initial framing and downstream relay, rather than invoking the identity fast
+path before deduplication. Other valid frames retain the existing safe text
+formatter. The unchanged current-base relay regression checks the framing
+boundary and the trimmed downstream tool arguments together.

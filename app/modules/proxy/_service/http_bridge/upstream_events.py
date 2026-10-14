@@ -2512,7 +2512,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
                 _archive_http_bridge_upstream_text(session, text, archive_request_state)
             return
-        event_block = format_sse_event_from_text(payload, text)
+        # Completed tool items may be mutated in place by deduplication below.
+        # Keep their initial framing on the same re-serialization path as relay.
+        event_block = (
+            format_sse_event(payload)
+            if event_type == "response.output_item.done"
+            else format_sse_event_from_text(payload, text)
+        )
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
