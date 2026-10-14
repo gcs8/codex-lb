@@ -3,6 +3,10 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { HttpResponse, http } from "msw";
+import { server } from "@/test/mocks/server";
+import { ApiError } from "@/lib/api-client";
+
 import {
   useSettings,
   useTelemetryConsent,
@@ -27,6 +31,23 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useSettings", () => {
+  it("keeps mutateAsync rejection available to callers that await an outcome", async () => {
+    server.use(http.put("/api/settings", () => HttpResponse.json({
+      error: { code: "validation_error", message: "Synthetic refusal" },
+    }, { status: 422 })));
+    const client = createTestQueryClient();
+    const view = renderHook(() => useSettings(), { wrapper: createWrapper(client) });
+    try {
+      await waitFor(() => expect(view.result.current.settingsQuery.isSuccess).toBe(true));
+      await expect(view.result.current.updateSettingsMutation.mutateAsync({ stickyThreadsEnabled: false }))
+        .rejects.toEqual(expect.objectContaining({ name: "ApiError", status: 422, code: "validation_error", message: "Synthetic refusal" }));
+      await waitFor(() => expect(view.result.current.updateSettingsMutation.error).toBeInstanceOf(ApiError));
+    } finally {
+      view.unmount();
+      client.clear();
+    }
+  });
+
   it("loads settings and invalidates cache on update", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

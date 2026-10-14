@@ -117,7 +117,12 @@ export function SettingsPage() {
     getErrorMessageOrNull(testEndpointMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
-    await updateSettingsMutation.mutateAsync(payload);
+    try {
+      await updateSettingsMutation.mutateAsync(payload);
+    } catch {
+      // useSettings owns error feedback and conflict refresh. Child controls
+      // discard this event promise, so observe its rejection here.
+    }
   };
 
   return (
