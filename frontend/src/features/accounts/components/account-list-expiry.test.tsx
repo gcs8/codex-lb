@@ -52,6 +52,36 @@ describe("Accounts list reset-credit expiry", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([
+    ["2026-10-07T08:00:00-04:00", true],
+    ["2026-10-07T17:30:00+05:30", true],
+    ["2026-10-07T08:00:00.001-04:00", false],
+    ["2026-10-04T08:00:00-04:00", false],
+  ])("compares offset timestamps as instants: %s", (expiry, visible) => {
+    render(<AccountList {...actions} accounts={[account(expiry)]} />);
+    expect(screen.queryByRole("img", { name: warning }) !== null).toBe(visible);
+  });
+
+  it("uses elapsed hours across a daylight-saving transition", () => {
+    vi.setSystemTime(Date.parse("2026-10-30T12:00:00-04:00"));
+    render(<AccountList {...actions} accounts={[account("2026-11-02T12:00:00-05:00")]} />);
+    expect(screen.queryByRole("img", { name: warning })).not.toBeInTheDocument();
+  });
+
+  it.each(["showResetCreditBadges", "showResetCreditExpiryBadge"] as const)(
+    "uses current time when %s is re-enabled after expiry",
+    (setting) => {
+      const accounts = [account(new Date(NOW + 30_000).toISOString())];
+      const view = render(<AccountList {...actions} accounts={accounts} {...{ [setting]: false }} />);
+      expect(vi.getTimerCount()).toBe(0);
+      act(() => vi.advanceTimersByTime(60_000));
+      view.rerender(<AccountList {...actions} accounts={accounts} {...{ [setting]: true }} />);
+      expect(screen.queryByRole("img", { name: warning })).not.toBeInTheDocument();
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it("removes the warning after expiry and responds to refreshed credit data", () => {
     const view = render(<AccountList {...actions} accounts={[account(new Date(NOW + 30_000).toISOString())]} />);
     expect(screen.getByRole("img", { name: warning })).toBeInTheDocument();

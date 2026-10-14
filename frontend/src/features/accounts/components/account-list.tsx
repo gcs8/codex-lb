@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,23 @@ import { cn } from "@/lib/utils";
 import { formatSlug } from "@/utils/formatters";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"];
+
+function createExpiryClock() {
+  let now = Date.now();
+  return {
+    getSnapshot: () => now,
+    subscribe: (onChange: () => void) => {
+      // React rechecks the snapshot after subscribing, so re-enabling a
+      // hidden badge does not reuse the time from before it was hidden.
+      now = Date.now();
+      const timer = window.setInterval(() => {
+        now = Date.now();
+        onChange();
+      }, 60_000);
+      return () => window.clearInterval(timer);
+    },
+  };
+}
 
 export type AccountListProps = {
   accounts: AccountSummary[];
@@ -59,12 +76,12 @@ export function AccountList({
   const [chooserOpen, setChooserOpen] = useState(false);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const activeSortMode = sortMode ?? DEFAULT_ACCOUNT_SORT_MODE;
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (!showResetCreditBadges || !showResetCreditExpiryBadge) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
-  }, [showResetCreditBadges, showResetCreditExpiryBadge]);
+  const [expiryClock] = useState(createExpiryClock);
+  const subscribeToExpiryClock = useCallback((onChange: () => void) => {
+    if (!showResetCreditBadges || !showResetCreditExpiryBadge) return () => {};
+    return expiryClock.subscribe(onChange);
+  }, [expiryClock, showResetCreditBadges, showResetCreditExpiryBadge]);
+  const now = useSyncExternalStore(subscribeToExpiryClock, expiryClock.getSnapshot);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
