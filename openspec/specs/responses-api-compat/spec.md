@@ -10796,6 +10796,12 @@ For an otherwise eligible pre-response HTTP-bridge attempt, the proxy MUST accou
 - **WHEN** a reason-only stream failure belongs to an attempt excluded by existing circuit eligibility or duplicate guards
 - **THEN** the terminal does not add a circuit failure
 
+#### Scenario: Repeated incomplete outcomes reach the retry cap
+- **WHEN** distinct eligible attempts on the same hard-affinity key terminate with reason-only `stream_incomplete` until the existing circuit threshold is reached
+- **THEN** the existing cooldown MUST suppress further pre-response retries
+- **AND** each attempt MUST settle and remove its pending state before returning
+- **AND** an idle upstream disconnect with no pending request MUST NOT add a failure or penalize the healthy account
+
 ### Requirement: Observed HTTP response IDs publish same-process ownership before delivery
 
 When an HTTP Responses attempt extracts a valid response ID from an actual upstream lifecycle event, it MUST publish that ID to the existing bounded process owner cache with the selected account and existing API-key/session scope before delivering the event that exposes the ID downstream. An immediate same-process follow-up referencing that ID MUST be able to resolve its known owner without waiting for the originating request-log write or originating stream completion. This readiness MUST apply from the first observed lifecycle event carrying the ID, including `response.created`, `response.queued`, and `response.in_progress`, whether delivered as SSE or adapted from a canonical background JSON acknowledgement; it MUST NOT promise that an unfinished response is already usable by the upstream provider.

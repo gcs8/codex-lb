@@ -178,3 +178,74 @@ async def test_incomplete_reason_keeps_existing_attempt_exclusions(
     assert terminal is not None and terminal["type"] == "response.incomplete"
     assert queue.get_nowait() is None
     assert not session.pending_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interpreted", [False, True])
+async def test_reason_only_incomplete_outcomes_reach_retry_cap_without_idle_account_penalty(
+    monkeypatch: pytest.MonkeyPatch, interpreted: bool
+) -> None:
+    service, session, first = _make_terminal_error_bridge_fixture(
+        request_id="incomplete-cap-1", key_value="incomplete-cap", response_event_count=0
+    )
+    service._durable_bridge = SimpleNamespace(**_stateful_retry_circuit_persistence())
+    handle_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_error)
+    _, _, second = _make_terminal_error_bridge_fixture(
+        request_id="incomplete-cap-2", key_value="incomplete-cap", response_event_count=0
+    )
+    assert await service._http_bridge_precreated_retry_allowed(session) is True
+    for ordinal, request in enumerate((first, second), start=1):
+        if request is second:
+            session.pending_requests.append(request)
+            session.queued_request_count = 1
+        request.awaiting_response_created = True
+        payload = {
+            "type": "response.incomplete",
+            "response": {
+                "id": f"resp-incomplete-cap-{ordinal}",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "stream_incomplete"},
+            },
+        }
+        text = json.dumps(payload)
+        message = UpstreamWebSocketMessage(
+            kind="text",
+            text=text,
+            responses_interpreted=interpreted,
+            event_type="response.incomplete" if interpreted else None,
+            payload=cast(Any, payload) if interpreted else None,
+        )
+        await service._process_http_bridge_upstream_text(session, text, message=message)
+        circuit = cast(Any, service)._http_bridge_retry_circuits[session.key]
+        assert circuit.consecutive_failures == ordinal
+        assert service._durable_bridge.persist_retry_circuit.await_count == ordinal
+        assert not session.pending_requests
+        assert request.terminal_settlement_phase is None
+        queue = request.event_queue
+        assert queue is not None
+        terminal = queue.get_nowait()
+        assert terminal is not None
+        assert proxy_service.parse_sse_data_json(terminal) == payload
+        assert queue.get_nowait() is None
+        assert queue.empty()
+        assert await service._http_bridge_precreated_retry_allowed(session) is (ordinal == 1)
+
+    assert await service._http_bridge_precreated_retry_cooldown_seconds(session) > 0
+    # Exercise the actual reader and retirement funnel after both requests
+    # settled. An ordinary idle socket close is not another failed attempt.
+    monkeypatch.setattr(
+        session.upstream,
+        "receive",
+        AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1000)),
+        raising=False,
+    )
+    await service._relay_http_bridge_upstream_messages(session)
+    circuit = cast(Any, service)._http_bridge_retry_circuits[session.key]
+    assert circuit.consecutive_failures == 2
+    assert service._durable_bridge.persist_retry_circuit.await_count == 2
+    handle_error.assert_not_awaited()
+    assert session.closed is True
+    assert not service._background_cleanup_tasks
+    write_log = cast(AsyncMock, service._write_request_log)
+    assert write_log.await_count == 2

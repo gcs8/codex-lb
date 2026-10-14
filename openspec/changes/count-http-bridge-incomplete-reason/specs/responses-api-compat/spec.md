@@ -19,3 +19,9 @@ For an otherwise eligible pre-response HTTP-bridge attempt, the proxy MUST accou
 #### Scenario: Existing attempt exclusions
 - **WHEN** a reason-only stream failure belongs to an attempt excluded by existing circuit eligibility or duplicate guards
 - **THEN** the terminal does not add a circuit failure
+
+#### Scenario: Repeated incomplete outcomes reach the retry cap
+- **WHEN** distinct eligible attempts on the same hard-affinity key terminate with reason-only `stream_incomplete` until the existing circuit threshold is reached
+- **THEN** the existing cooldown MUST suppress further pre-response retries
+- **AND** each attempt MUST settle and remove its pending state before returning
+- **AND** an idle upstream disconnect with no pending request MUST NOT add a failure or penalize the healthy account
