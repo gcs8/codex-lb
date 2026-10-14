@@ -99,7 +99,7 @@ async def _populate_test_registry() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/v1/models", "/backend-api/codex/models"])
+@pytest.mark.parametrize("path", ["/v1/models", "/v1/models/gpt-5.2", "/backend-api/codex/models"])
 async def test_models_routes_release_reservation_when_catalog_read_fails(async_client, monkeypatch, path):
     """Both public model routes settle their reservation on a catalog failure."""
     released: list[str] = []
@@ -512,6 +512,126 @@ async def test_v1_models_filters_source_models_by_exact_allowlist(async_client):
     assert canonical_response.status_code == 200
     canonical_ids = {item["id"] for item in canonical_response.json()["data"]}
     assert "gpt-5-high" not in canonical_ids
+
+
+async def _enable_api_key_auth(async_client) -> None:
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_matches_list_entry(async_client, monkeypatch):
+    await _populate_test_registry()
+    # Each catalog read stamps `created` from time.time(); pin it so the two reads compare equal.
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    listed = await async_client.get("/v1/models")
+    assert listed.status_code == 200
+    entry = next(item for item in listed.json()["data"] if item["id"] == "gpt-5.2")
+
+    response = await async_client.get("/v1/models/gpt-5.2")
+    assert response.status_code == 200
+    assert response.json() == entry
+    assert response.json()["object"] == "model"
+
+    # client_version does not switch the single-model route to the Codex catalog.
+    with_version = await async_client.get("/v1/models/gpt-5.2", params={"client_version": "0.99.0"})
+    assert with_version.status_code == 200
+    assert with_version.json() == entry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_version", [None, "0.99.0"])
+async def test_v1_models_trailing_slash_preserves_list_redirect(async_client, monkeypatch, client_version):
+    await _populate_test_registry()
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    params = {"client_version": client_version} if client_version else {}
+
+    redirect = await async_client.get("/v1/models/", params=params, follow_redirects=False)
+    assert redirect.status_code == 307
+    expected = await async_client.get("/v1/models", params=params)
+    followed = await async_client.get(redirect.headers["location"])
+    assert expected.status_code == followed.status_code == 200
+    assert followed.json() == expected.json()
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_unknown_model_returns_404(async_client):
+    await _populate_test_registry()
+    response = await async_client.get("/v1/models/does-not-exist")
+    assert response.status_code == 404
+    error = response.json()["error"]
+    assert error["code"] == "model_not_found"
+    assert error["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_respects_api_key_allowlist(async_client):
+    await _populate_test_registry()
+    await _enable_api_key_auth(async_client)
+
+    restricted = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "retrieve-restricted", "allowedModels": ["gpt-5.2"]},
+    )
+    assert restricted.status_code == 200
+    unrestricted = await async_client.post("/api/api-keys/", json={"name": "retrieve-open"})
+    assert unrestricted.status_code == 200
+
+    allowed = await async_client.get(
+        "/v1/models/gpt-5.2",
+        headers={"Authorization": f"Bearer {restricted.json()['key']}"},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["id"] == "gpt-5.2"
+
+    excluded = await async_client.get(
+        "/v1/models/gpt-5.3-codex",
+        headers={"Authorization": f"Bearer {restricted.json()['key']}"},
+    )
+    assert excluded.status_code == 404
+    assert excluded.json()["error"]["code"] == "model_not_found"
+
+    open_response = await async_client.get(
+        "/v1/models/gpt-5.3-codex",
+        headers={"Authorization": f"Bearer {unrestricted.json()['key']}"},
+    )
+    assert open_response.status_code == 200
+    assert open_response.json()["id"] == "gpt-5.3-codex"
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_filters_sources_by_api_key_assignment(async_client, monkeypatch):
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    first_source_id = await _create_model_source(async_client, name="retrieve-first", model="org/visible-model")
+    await _create_model_source(async_client, name="retrieve-second", model="org/hidden-model")
+    await _enable_api_key_auth(async_client)
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "retrieve-source-scoped", "assignedSourceIds": [first_source_id]},
+    )
+    assert created.status_code == 200
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+
+    listed = await async_client.get("/v1/models", headers=headers)
+    assert listed.status_code == 200
+    entry = next(item for item in listed.json()["data"] if item["id"] == "org/visible-model")
+
+    visible = await async_client.get("/v1/models/org/visible-model", headers=headers)
+    assert visible.status_code == 200
+    assert visible.json() == entry
+
+    hidden = await async_client.get("/v1/models/org/hidden-model", headers=headers)
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "model_not_found"
 
 
 @pytest.mark.asyncio
@@ -1569,6 +1689,9 @@ def _raw_with_max_context_window(max_context_window: int) -> dict[str, JsonValue
 async def test_v1_models_reports_backend_context_window(async_client):
     registry = get_model_registry()
     models = [
+        _make_upstream_model("gpt-6-astra", raw=_raw_with_max_context_window(872_000)),
+        _make_upstream_model("gpt-6-sol", raw=_raw_with_max_context_window(872_000)),
+        _make_upstream_model("gpt-6-luna", raw=_raw_with_max_context_window(872_000)),
         _make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(1_000_000)),
         _make_upstream_model("gpt-5.5", raw=_raw_with_max_context_window(272_000)),
         _make_upstream_model("gpt-5.4-mini", raw=_raw_with_max_context_window(272_000)),
@@ -1580,7 +1703,15 @@ async def test_v1_models_reports_backend_context_window(async_client):
     assert resp_v1.status_code == 200
     metadata_by_id = {item["id"]: item["metadata"] for item in resp_v1.json()["data"]}
 
-    for slug in ("gpt-5.4", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"):
+    for slug in (
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.4",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+    ):
         metadata = metadata_by_id[slug]
         assert metadata["context_window"] == 272_000
         assert metadata["input_context_window"] == 272_000
@@ -1608,6 +1739,23 @@ async def test_v1_models_reports_backend_context_window(async_client):
     assert codex_by_slug["gpt-5.4"]["max_context_window"] == 1_000_000
     assert codex_by_slug["gpt-5.5"]["context_window"] == 272_000
     assert codex_by_slug["gpt-5.5"]["max_context_window"] == 272_000
+
+
+@pytest.mark.asyncio
+async def test_v1_models_prefers_raw_max_output_tokens_over_slug_fallback(async_client):
+    registry = get_model_registry()
+    raw = _raw_with_max_context_window(872_000)
+    raw["max_output_tokens"] = 96_000
+    models = [_make_upstream_model("gpt-6-sol", raw=raw)]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/v1/models")
+    assert resp.status_code == 200
+    entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-6-sol")
+    assert entry["metadata"]["max_output_tokens"] == 96_000
+    assert entry["capabilities"]["max_output_tokens"] == 96_000
+    assert entry["maxOutputTokens"] == 96_000
+    assert entry["max_output_tokens"] == 96_000
 
 
 @pytest.mark.asyncio
