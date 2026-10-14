@@ -2,15 +2,11 @@
 
 ### Requirement: Required-owner WebSocket connection failures preserve the upstream error
 
-When a direct Responses WebSocket connection has a hard required account and
-its classified upstream failure reaches the shared deterministic failover
-decision, the proxy MUST surface the original upstream status and error payload
-without excluding that required account and reselecting it. The decision MUST
-retain the existing account classification and stream-lease cleanup behavior.
-
-A movable request MUST retain its existing pre-visible failover eligibility.
-This requirement MUST NOT change the dedicated authentication-refresh or
-confirmed pre-dispatch transport branches.
+For a hard required account, direct Responses WebSocket deterministic failover
+MUST surface the original upstream status and error payload without owner
+exclusion or reselection. It MUST preserve account classification, stream-lease
+cleanup and movable pre-visible failover eligibility. It MUST NOT change
+authentication-refresh or confirmed pre-dispatch transport branches.
 
 #### Scenario: Retryable 403 with a required replay owner
 
