@@ -416,6 +416,21 @@ def _text_with_thread_cache_identity(text_data: str, identity: ThreadCacheIdenti
     return json.dumps(frame, ensure_ascii=True, separators=(",", ":"))
 
 
+def _http_bridge_last_probe_claim(
+    claims: list[tuple[float, object, int]],
+    *,
+    owner: object,
+) -> tuple[float, object, int] | None:
+    if not claims:
+        return None
+    claim = claims[-1]
+    # Preserve the pre-generation admission callback's deadline channel.
+    # Generation zero cannot match any probe installed by the current gate.
+    if isinstance(claim, (int, float)):
+        return float(claim), owner, 0
+    return claim
+
+
 async def _release_http_bridge_retry_circuit_half_open_deferring_cancellation(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -1068,7 +1083,7 @@ class _HTTPBridgeRequestSubmitMixin:
         released_admission_waiter = await self._release_http_bridge_admission_preregistration(
             session, request_state=request_state
         )
-        claimed_probe = admission_claims[-1] if admission_claims else None
+        claimed_probe = _http_bridge_last_probe_claim(admission_claims, owner=request_state)
         if claimed_probe is not None and request_state.response_create_attempt_count == 0:
             # This admission claimed the half-open probe but the request
             # never ATTEMPTED the upstream send — a poisoned-anchor
@@ -1155,7 +1170,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # nothing, so a later fail-closed path can hand back only its own
         # probe and never a lease another submission installed under any
         # interleaving.
-        claimed_probe = admission_claims[-1] if admission_claims else None
+        claimed_probe = _http_bridge_last_probe_claim(admission_claims or [], owner=request_state)
         request_state.claimed_half_open_until = claimed_probe[0] if claimed_probe is not None else 0.0
         request_state.claimed_half_open_generation = claimed_probe[2] if claimed_probe is not None else 0
         if not retry_allowed:
@@ -3796,7 +3811,7 @@ class _HTTPBridgeRequestSubmitMixin:
             body_exception = exc
             raise
         finally:
-            claimed_probe = admission_claims[-1] if admission_claims else None
+            claimed_probe = _http_bridge_last_probe_claim(admission_claims, owner=request_state or session)
             if claimed_probe is not None:
                 send_attempt_advanced = bool(retry_send_baselines) and (
                     retry_send_baselines[-1][0].response_create_attempt_count > retry_send_baselines[-1][1]
@@ -3883,10 +3898,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     if not request_state.draining_until_terminal and request_is_retryable(request_state)
                 ]
                 if request_state is None and len(retryable_candidates) != 1:
-                    # A half-open lease must always have a concrete pending
-                    # request owner. Fail closed before admission when the
-                    # reader cannot identify exactly one candidate.
-                    return False
+                    # Consult admission even when the unique pending turn is
+                    # not replayable. If admission claims a probe, the outer
+                    # finalizer returns it when dispatch eligibility fails.
+                    if len(session.pending_requests) != 1:
+                        return False
+                    probe_owner = session.pending_requests[0]
                 if request_state is not None and all(
                     candidate is not request_state for candidate in retryable_candidates
                 ):
@@ -3932,7 +3949,8 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
         if admission_claims:
-            claimed_probe = admission_claims[-1]
+            claimed_probe = _http_bridge_last_probe_claim(admission_claims, owner=probe_owner or session)
+            assert claimed_probe is not None
             claimed_owner = claimed_probe[1]
             if isinstance(claimed_owner, _WebSocketRequestState):
                 claimed_owner.claimed_half_open_until = claimed_probe[0]

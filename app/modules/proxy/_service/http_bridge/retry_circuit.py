@@ -1881,7 +1881,14 @@ class _HTTPBridgeRetryCircuitMixin:
                 return False
             if expected_half_open_until is not None and state.half_open_until != expected_half_open_until:
                 return False
-            if state.half_open_owner_session is not session:
+            legacy_deadline_claim = (
+                state.half_open_lease_generation == 0
+                and state.half_open_owner_session is None
+                and state.half_open_owner_token is None
+                and expected_half_open_generation == 0
+                and expected_half_open_until == state.half_open_until
+            )
+            if state.half_open_owner_session is not session and not legacy_deadline_claim:
                 return False
             # Older in-memory states (including callers that construct the
             # state directly in tests) have no episode token. Keep their
