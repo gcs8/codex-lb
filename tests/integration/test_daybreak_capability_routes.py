@@ -83,6 +83,7 @@ _LOCAL_AUTHENTICATED_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "GET", "/api/codex/usage"),
     }
 )
+_LOCAL_REDIRECT_ROUTES: frozenset[_RouteKey] = frozenset({("HTTP", "GET", "/v1/models/")})
 _RESPONSES_WEBSOCKET_ROUTES: frozenset[_RouteKey] = frozenset(
     {
         ("WS", "WEBSOCKET", "/backend-api/codex/responses"),
@@ -117,6 +118,7 @@ def test_registered_proxy_route_inventory_has_one_explicit_capability_policy(app
     policy_groups = (
         _FAIL_CLOSED_HTTP_ROUTES,
         _LOCAL_AUTHENTICATED_ROUTES,
+        _LOCAL_REDIRECT_ROUTES,
         _RESPONSES_WEBSOCKET_ROUTES,
         _FAIL_CLOSED_WEBSOCKET_ROUTES,
         _SEPARATE_NAMESPACE_ROUTES,

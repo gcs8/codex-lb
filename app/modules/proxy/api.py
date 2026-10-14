@@ -26,7 +26,7 @@ from fastapi import (
     Security,
     WebSocket,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1723,6 +1723,12 @@ async def v1_models(
     if request.query_params.get("client_version"):
         return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
+
+
+@v1_router.get("/models/", response_model=None, include_in_schema=False)
+async def v1_models_trailing_slash(request: Request) -> Response:
+    # The greedy model-id route would otherwise consume the list's empty suffix.
+    return RedirectResponse(str(request.url.replace(path=request.url.path.removesuffix("/"))), status_code=307)
 
 
 @v1_router.get("/models/{model_id:path}", response_model=None)

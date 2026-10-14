@@ -548,6 +548,21 @@ async def test_v1_model_retrieve_matches_list_entry(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_version", [None, "0.99.0"])
+async def test_v1_models_trailing_slash_preserves_list_redirect(async_client, monkeypatch, client_version):
+    await _populate_test_registry()
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    params = {"client_version": client_version} if client_version else {}
+
+    redirect = await async_client.get("/v1/models/", params=params, follow_redirects=False)
+    assert redirect.status_code == 307
+    expected = await async_client.get("/v1/models", params=params)
+    followed = await async_client.get(redirect.headers["location"])
+    assert expected.status_code == followed.status_code == 200
+    assert followed.json() == expected.json()
+
+
+@pytest.mark.asyncio
 async def test_v1_model_retrieve_unknown_model_returns_404(async_client):
     await _populate_test_registry()
     response = await async_client.get("/v1/models/does-not-exist")

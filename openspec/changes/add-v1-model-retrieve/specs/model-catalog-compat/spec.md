@@ -44,3 +44,15 @@ request reservation on every exit, including the 404 path.
 
 - **WHEN** a client requests `GET /v1/models/{model_id}?client_version=0.99.0`
 - **THEN** the response is the OpenAI `model` object, not the Codex catalog shape
+
+### Requirement: Trailing-slash list requests retain their redirect
+
+The service MUST continue to redirect `GET /v1/models/` to `GET /v1/models`
+with HTTP 307, preserving query parameters. The single-model route MUST NOT
+treat an empty model ID as an unknown model.
+
+#### Scenario: Trailing-slash list request retains client_version
+
+- **WHEN** a client requests `GET /v1/models/?client_version=0.99.0`
+- **THEN** the response is HTTP 307 with the query parameter preserved
+- **AND** following the redirect returns the Codex catalog rather than a model-not-found error
