@@ -2643,6 +2643,7 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
                 "reasoning": {"effort": "high", "context": "all_turns"},
+                "parallel_tool_calls": False,
                 "client_metadata": {
                     "x-codex-turn-metadata": (
                         '{"installation_id":"account-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
