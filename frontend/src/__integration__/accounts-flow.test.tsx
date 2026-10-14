@@ -14,11 +14,11 @@ describe("accounts flow integration", () => {
     server.use(http.get("/api/accounts", () => HttpResponse.json({
       accounts: [
         createAccountSummary({
-          accountId: "visible-pro", email: "visible-pro@example.com", planType: "pro",
+          accountId: "visible-pro", email: "visible-pro@example.com", displayName: "visible-pro@example.com", planType: "pro",
           status: "paused", usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 100 },
         }),
         createAccountSummary({
-          accountId: "visible-custom", email: "visible-custom@example.com", planType: "future_plan",
+          accountId: "visible-custom", email: "visible-custom@example.com", displayName: "visible-custom@example.com", planType: "future_plan",
           status: "active", usage: { primaryRemainingPercent: 0, secondaryRemainingPercent: 0 },
         }),
       ],
