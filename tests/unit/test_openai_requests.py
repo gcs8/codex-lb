@@ -900,9 +900,10 @@ def test_responses_json_object_keeps_json_instruction_in_input_as_developer():
     }
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.instructions == "primary\nBe brief."
+    assert request.instructions == "primary"
     assert request.input == [
         {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Answer in JSON."}]},
+        {"type": "message", "role": "developer", "content": "Be brief."},
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
 
