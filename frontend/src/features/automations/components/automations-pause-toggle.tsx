@@ -32,7 +32,14 @@ export function AutomationsPauseToggle() {
   // Shared "busy" for the switch and the badge's reset action, as on the
   // Settings page: a pending write, or no write permission at all.
   const busy = updateSettingsMutation.isPending || !canWrite;
-  const save = (payload: SettingsUpdateRequest) => updateSettingsMutation.mutateAsync(payload).then(() => undefined);
+  const save = async (payload: SettingsUpdateRequest) => {
+    try {
+      await updateSettingsMutation.mutateAsync(payload);
+    } catch {
+      // useSettings already reports the error. The switch and inheritance
+      // button discard this event promise, so own its rejection here.
+    }
+  };
 
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2">
