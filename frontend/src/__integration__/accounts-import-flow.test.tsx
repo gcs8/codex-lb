@@ -1,13 +1,33 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 describe("accounts import route integration", () => {
+  beforeEach(async () => {
+    // jsdom's File/FormData cannot be serialized by Node's fetch. Use the
+    // constructors from the fetch realm without replacing fetch or the API.
+    const formData = await new Request("http://localhost/api/accounts/import", {
+      method: "POST",
+      headers: { "Content-Type": "multipart/form-data; boundary=fixture-realm" },
+      body: '--fixture-realm\r\nContent-Disposition: form-data; name="file"; filename="fixture.json"\r\nContent-Type: application/json\r\n\r\n{}\r\n--fixture-realm--\r\n',
+    }).formData();
+    const file = formData.get("file");
+    if (!file || typeof file === "string") {
+      throw new Error("Fetch realm fixture did not produce a File");
+    }
+    vi.stubGlobal("FormData", formData.constructor);
+    vi.stubGlobal("File", file.constructor);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it.each([400, 403])("retains the pending batch after a %s refusal and retries without duplicating success", async (status) => {
     const user = userEvent.setup({ delay: null });
     const attempted: string[] = [];
@@ -17,6 +37,7 @@ describe("accounts import route integration", () => {
         expect(request.headers.get("content-type")).toMatch(/^multipart\/form-data; boundary=/);
         const body = await request.text();
         expect(body.match(/name="auth_json"/g)).toHaveLength(1);
+        expect(body).toContain("\r\n\r\n{}\r\n");
         const name = /filename="([^"]+)"/.exec(body)?.[1];
         expect(name).toBeDefined();
         attempted.push(name!);
@@ -47,6 +68,11 @@ describe("accounts import route integration", () => {
     await user.upload(within(dialog).getByLabelText(/auth\.json files/i), files);
     await user.click(within(dialog).getByRole("button", { name: "Import" }));
     await within(dialog).findByText("Synthetic import refusal");
+    expect(queryClient.getMutationCache().getAll().find((mutation) => mutation.state.status === "error")?.state.error).toMatchObject({
+      status,
+      code: status === 403 ? "read_only_access" : "invalid_auth_json",
+      message: "Synthetic import refusal",
+    });
     expect(attempted).toEqual(["first.json", "second.json"]);
     expect(within(dialog).queryByText("first.json")).not.toBeInTheDocument();
     expect(within(dialog).getByText("second.json")).toBeInTheDocument();
