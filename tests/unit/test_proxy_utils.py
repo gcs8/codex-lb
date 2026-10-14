@@ -20862,6 +20862,7 @@ async def test_stream_post_terminal_health_preserves_status_and_cleanup(
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_terminal_status_cleanup")
+    api_key = _make_api_key_data("key_post_terminal_status_cleanup")
     reservation = ApiKeyUsageReservationData(
         reservation_id="resv_post_terminal_status_cleanup",
         key_id="key_post_terminal_status_cleanup",
@@ -20886,6 +20887,7 @@ async def test_stream_post_terminal_health_preserves_status_and_cleanup(
     async def fake_stream_once(*args: object, **kwargs: object):
         settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
         settlement.downstream_visible = True
+        settlement.settlement_order_required = True
         settlement.response_id = "resp_post_terminal_status_cleanup"
         yield 'data: {"type":"response.created","response":{"id":"resp_post_terminal_status_cleanup"}}\n\n'
         if upstream_status is not None:
@@ -20915,7 +20917,7 @@ async def test_stream_post_terminal_health_preserves_status_and_cleanup(
         codex_session_affinity=False,
         propagate_http_errors=False,
         openai_cache_affinity=False,
-        api_key=None,
+        api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=False,
         request_transport="http",
