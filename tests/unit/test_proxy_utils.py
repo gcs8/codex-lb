@@ -24514,6 +24514,7 @@ async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkey
     if retryable and not owner_bound:
         assert result == (other, upstream)
         assert pool_select.await_count == 2
+        assert pool_select.await_args is not None
         assert pool_select.await_args.kwargs["exclude_account_ids"] == {owner.id}
         assert [call.args[0].id for call in open_upstream.await_args_list] == [owner.id, other.id]
         websocket_send.assert_not_awaited()
@@ -24521,8 +24522,10 @@ async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkey
     assert result == (None, None)
     pool_select.assert_awaited_once()
     open_upstream.assert_awaited_once()
+    assert open_upstream.await_args is not None
     assert open_upstream.await_args.args[0].id == owner.id
     websocket_send.assert_awaited_once()
+    assert websocket_send.await_args is not None
     sent = json.loads(websocket_send.await_args.args[0])
     assert sent["status"] == 403
     assert sent["error"] == payload["error"]
