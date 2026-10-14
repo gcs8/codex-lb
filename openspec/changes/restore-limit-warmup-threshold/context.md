@@ -65,4 +65,3 @@ The public threshold is a database-only T3 behavior tunable stored in
 Settings environment field, environment seed, or budget exception. Existing
 inheritable settings retain code default < environment < dashboard precedence.
 Global and per-account warm-up remain disabled by default.
-
