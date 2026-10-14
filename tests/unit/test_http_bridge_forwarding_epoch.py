@@ -220,17 +220,54 @@ async def test_capability_boolean_without_epoch_does_not_authorize_dispatch(
     [
         ([], False),
         ([{"role": "system", "content": "short"}], False),
-        ([{"role": "developer", "content": "short"}], False),
+        ([{"type": "message", "role": "system", "content": "short"}], False),
         ([{"role": "system", "content": "x" * 4096}], True),
-        ([{"role": "developer", "content": "x" * 4096}], True),
-        ([{"role": "system", "content": "a"}, {"role": "developer", "content": "b"}], True),
+        ([{"type": "message", "role": "system", "content": "x" * 4096}], True),
+        ([{"role": "system", "content": "a"}, {"role": "system", "content": "b"}], True),
     ],
-    ids=["empty", "small-system", "small-developer", "large-system", "large-developer", "multi-instructions"],
+    ids=["empty", "small-system", "small-system-message", "large-system", "large-system-message", "multi-instructions"],
 )
 def test_normalized_empty_classifier_disagreement(input_value: object, requires_upgrade: bool) -> None:
     payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": input_value})
     assert payload.input == []
     assert forwarding._http_bridge_owner_forward_requires_shape_upgrade(payload) is requires_upgrade
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected_input", "expected_instructions", "requires_upgrade"),
+    [
+        (
+            [{"role": "developer", "content": "short"}],
+            [{"role": "developer", "content": "short"}],
+            "hi",
+            False,
+        ),
+        (
+            [{"role": "developer", "content": "x" * 4096}],
+            [{"role": "developer", "content": "x" * 4096}],
+            "hi",
+            False,
+        ),
+        (
+            [{"role": "system", "content": "a"}, {"role": "developer", "content": "b"}],
+            [{"role": "developer", "content": "b"}],
+            "hi\na",
+            True,
+        ),
+    ],
+    ids=["small-developer", "large-developer", "mixed-instructions"],
+)
+def test_developer_input_retained_during_classifier_comparison(
+    input_value: object, expected_input: object, expected_instructions: str, requires_upgrade: bool
+) -> None:
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": input_value})
+    assert payload.input == expected_input
+    assert payload.instructions == expected_instructions
+    assert forwarding._http_bridge_owner_forward_requires_shape_upgrade(payload) is requires_upgrade
+    owner_payload = ResponsesRequest.model_validate(payload.model_dump_for_http_bridge_owner_forwarding())
+    assert owner_payload.input == expected_input
+    assert owner_payload.instructions == expected_instructions
+    assert forwarding._http_bridge_owner_forward_requires_shape_upgrade(owner_payload) is requires_upgrade
 
 
 @pytest.mark.asyncio
@@ -239,10 +276,10 @@ def test_normalized_empty_classifier_disagreement(input_value: object, requires_
     "input_value",
     [
         [{"role": "system", "content": "x" * 4096}],
-        [{"role": "developer", "content": "x" * 4096}],
-        [{"role": "system", "content": "a"}, {"role": "developer", "content": "b"}],
+        [{"type": "message", "role": "system", "content": "x" * 4096}],
+        [{"role": "system", "content": "a"}, {"role": "system", "content": "b"}],
     ],
-    ids=["large-system", "large-developer", "multi-instructions"],
+    ids=["large-system", "large-system-message", "multi-instructions"],
 )
 async def test_normalized_empty_disagreement_rejected_before_dispatch(
     monkeypatch: pytest.MonkeyPatch, has_capability: bool, input_value: object
