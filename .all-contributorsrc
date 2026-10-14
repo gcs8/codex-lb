@@ -1543,6 +1543,16 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "loz100loz",
+      "name": "Ninjie",
+      "avatar_url": "https://avatars.githubusercontent.com/u/25230273?v=4",
+      "profile": "https://github.com/loz100loz",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
