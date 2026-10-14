@@ -19,4 +19,4 @@ None.
 
 ## Impact
 
-Focused dashboard changes; the model-picker change also extends dashboard model metadata. No migrations, new settings, dependencies, navigation items, or setup steps.
+Focused dashboard account sorting changes. No migrations, new settings, dependencies, navigation items, or setup steps.

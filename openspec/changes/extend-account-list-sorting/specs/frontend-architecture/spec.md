@@ -16,3 +16,14 @@ The Accounts sort selector SHALL offer ascending and descending ordering by stat
 #### Scenario: Status order and filtering
 - **WHEN** the operator selects active-first status ordering and filters the account list
 - **THEN** the selected mode remains active and active accounts precede paused accounts
+
+#### Scenario: Weekly-only quota is not inferred
+- **WHEN** an account has weekly quota but no reported primary remaining percentage
+- **THEN** both 5-hour quota sort directions treat its primary quota as unknown
+- **AND** its weekly percentage is not substituted for the missing primary value
+
+#### Scenario: Sorting preserves credential-slot identity and plan display
+- **WHEN** accounts with the same email and distinct local account identifiers are sorted or filtered
+- **THEN** every matching credential slot remains independently selectable by its original account identifier
+- **AND** the existing Pro and Prolite plan labels and workspace context remain visible
+- **AND** weekly-only accounts continue to omit the unavailable 5-hour row
