@@ -351,6 +351,51 @@ describe("AccountList", () => {
     expect(within(resetButton).getByText("99+")).toBeInTheDocument();
   });
 
+  it("renders every compact account once and opens details from the keyboard", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const accounts = ["Beta", "Alpha", "Charlie", "Delta", "Echo"].map((name, index) =>
+      createAccountSummary({ accountId: `acc-${index}`, displayName: `${name} Account` }),
+    );
+    render(<AccountList accounts={accounts} compact onAction={onAction} />);
+    const rows = screen.getAllByTestId("account-compact-row");
+    expect(rows).toHaveLength(accounts.length);
+    for (const account of accounts) {
+      expect(screen.getAllByText(account.displayName!)).toHaveLength(1);
+    }
+    const details = screen.getByRole("button", { name: "View details for Beta Account" });
+    details.focus();
+    await user.keyboard("{Enter}");
+    expect(onAction).toHaveBeenCalledExactlyOnceWith(accounts[0], "details");
+    expect(screen.queryByTestId("account-list-quota-meter")).not.toBeInTheDocument();
+  });
+
+  it("retains privacy masking and ignores hidden full-list sorts in compact mode", () => {
+    act(() => usePrivacyStore.setState({ blurred: true }));
+    const accounts = [
+      createAccountSummary({ accountId: "acc-b", displayName: "Beta Account", email: "beta@example.com", creditsBalance: 20 }),
+      createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account", creditsBalance: 5 }),
+    ];
+    render(<AccountList accounts={accounts} compact readOnly sort={{ key: "purchasedCredits", direction: "asc" }} />);
+    expect(screen.getAllByTestId("account-compact-row")[0]).toHaveTextContent("Beta Account");
+    expect(screen.getByText("Beta Account")).toHaveClass("privacy-blur");
+    expect(screen.getByText("beta@example.com")).toHaveClass("privacy-blur");
+    expect(screen.queryByRole("button", { name: /Pause|Resume|Redeem/ })).not.toBeInTheDocument();
+  });
+
+  it("clears the full-list sort on the third header activation", async () => {
+    const user = userEvent.setup();
+    render(<AccountList accounts={[
+      createAccountSummary({ accountId: "acc-b", displayName: "Beta Account" }),
+      createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account" }),
+    ]} />);
+    await user.click(screen.getByRole("button", { name: "Account" }));
+    await user.click(screen.getByRole("button", { name: "Account, sorted ascending" }));
+    await user.click(screen.getByRole("button", { name: "Account, sorted descending" }));
+    expect(rowNames()).toEqual(["Beta Account", "Alpha Account"]);
+    expect(screen.getByRole("button", { name: "Account" })).toBeInTheDocument();
+  });
+
   it("links the empty-account state to the Accounts page", () => {
     render(
       <MemoryRouter>

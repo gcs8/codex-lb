@@ -76,6 +76,16 @@ describe("useDashboardPreferencesStore", () => {
     expect(window.localStorage.getItem("codex-lb-dashboard-account-view-mode")).toBe("list");
   });
 
+  it("restores and persists compact account view mode", async () => {
+    window.localStorage.setItem("codex-lb-dashboard-account-view-mode", "compact");
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+    useDashboardPreferencesStore.getState().initializePreferences();
+    expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("compact");
+    useDashboardPreferencesStore.getState().setAccountViewMode("cards");
+    useDashboardPreferencesStore.getState().setAccountViewMode("compact");
+    expect(window.localStorage.getItem("codex-lb-dashboard-account-view-mode")).toBe("compact");
+  });
+
   it("persists account list sort updates", async () => {
     const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
 
