@@ -44,6 +44,7 @@ _FAIL_CLOSED_HTTP_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "POST", "/backend-api/codex/memories/trace_summarize"),
         ("HTTP", "POST", "/backend-api/codex/safety/arc"),
         ("HTTP", "POST", "/backend-api/codex/alpha/search"),
+        ("HTTP", "POST", "/v1/alpha/search"),
         ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/list_windows"),
         ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/list_windows/"),
         ("HTTP", "POST", "/backend-api/codex/alpha/history/v2/list_items"),
@@ -188,6 +189,7 @@ _PROVIDER_ROUTING_CASES = [
     pytest.param("POST", "/backend-api/codex/realtime/calls", {"content": b"v=offer\r\n"}, id="realtime-call"),
     pytest.param("POST", "/backend-api/codex/safety/arc", {"json": {}}, id="safety-arc"),
     pytest.param("POST", "/backend-api/codex/alpha/search", {"json": {}}, id="alpha-search"),
+    pytest.param("POST", "/v1/alpha/search", {"json": {}}, id="v1-alpha-search"),
     pytest.param(
         "POST",
         "/backend-api/codex/alpha/notes/v2/thread_hint",
