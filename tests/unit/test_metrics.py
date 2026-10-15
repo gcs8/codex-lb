@@ -104,11 +104,22 @@ def reset_metrics_modules() -> Iterator[None]:
 def _load_metrics_modules(
     monkeypatch: pytest.MonkeyPatch, *, prometheus_client_module: types.ModuleType | None
 ) -> tuple[types.ModuleType, types.ModuleType]:
+    """Reload metrics against a fake client or a guaranteed missing dependency."""
     for name in ("app.core.metrics.prometheus", "app.core.metrics.middleware"):
         sys.modules.pop(name, None)
 
-    # A None entry blocks both import statements and importlib's module loader.
-    monkeypatch.setitem(sys.modules, "prometheus_client", prometheus_client_module)
+    if prometheus_client_module is not None:
+        monkeypatch.setitem(sys.modules, "prometheus_client", prometheus_client_module)
+    else:
+        monkeypatch.delitem(sys.modules, "prometheus_client", raising=False)
+        real_import_module = importlib.import_module
+
+        def _missing_prometheus_import(name: str, package: str | None = None) -> types.ModuleType:
+            if name == "prometheus_client":
+                raise ImportError("prometheus_client is not installed")
+            return real_import_module(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _missing_prometheus_import)
 
     prometheus_module = importlib.import_module("app.core.metrics.prometheus")
     middleware_module = importlib.import_module("app.core.metrics.middleware")
@@ -180,6 +191,29 @@ def test_cap_partition_replicas_gauge_has_no_multiprocess_mode_in_single_process
     gauge = prometheus_module.cap_partition_replicas
     assert gauge is not None
     assert gauge.multiprocess_mode is None
+
+
+@pytest.mark.parametrize("multiprocess", [False, True])
+def test_account_pool_gauges_use_latest_snapshot_without_worker_duplication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, multiprocess: bool
+) -> None:
+    """Use whole-pool gauge aggregation without adding process labels."""
+    if multiprocess:
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    else:
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+    assert module.accounts_total.labelnames == ("status",)
+    assert module.accounts_available.labelnames == ()
+    for gauge in (module.accounts_total, module.accounts_available):
+        assert gauge.multiprocess_mode == ("livemostrecent" if multiprocess else None)
+
+
+def test_account_pool_gauges_are_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave account gauges disabled when the optional client cannot be imported."""
+    module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=None)
+    assert module.accounts_total is None
+    assert module.accounts_available is None
 
 
 @pytest.mark.asyncio
