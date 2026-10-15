@@ -795,3 +795,48 @@ async def test_account_quota_tier_override_validation(async_client):
         "/api/accounts/acc_tier_past/quota-tier", json={"quotaTierMultiplier": 20, "quotaTierMultiplierExpiresAt": past}
     )
     assert expired.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_raw_monthly_credits(async_client):
+    """The override can be given as raw monthly credits instead of a multiplier; not both."""
+    from datetime import timezone
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="acc_tier_credits",
+                email="tier-credits@example.com",
+                plan_type="prolite",
+                access_token_encrypted=encryptor.encrypt("a"),
+                refresh_token_encrypted=encryptor.encrypt("r"),
+                id_token_encrypted=encryptor.encrypt("i"),
+                last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+    both = await async_client.put(
+        "/api/accounts/acc_tier_credits/quota-tier", json={"quotaTierMultiplier": 5, "quotaMonthlyCredits": 40000}
+    )
+    assert both.status_code == 400
+
+    response = await async_client.put("/api/accounts/acc_tier_credits/quota-tier", json={"quotaMonthlyCredits": 45360})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["quotaTierMultiplier"] is None
+    assert body["quotaMonthlyCredits"] == 45360
+    assert body["effectiveQuotaTierMultiplier"] == pytest.approx(6.0)
+    assert body["effectiveQuotaMonthlyCredits"] == pytest.approx(45360)
+
+    accounts = (await async_client.get("/api/accounts")).json()["accounts"]
+    account = next(item for item in accounts if item["accountId"] == "acc_tier_credits")
+    assert account["capacityCreditsSecondary"] == pytest.approx(45360 * 7 / 30)
+    assert account["capacityCreditsSecondaryMonthlyEquivalent"] == pytest.approx(45360)
+
+    cleared = await async_client.put("/api/accounts/acc_tier_credits/quota-tier", json={"quotaMonthlyCredits": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["quotaMonthlyCredits"] is None
+    assert cleared.json()["effectiveQuotaTierMultiplier"] == 5

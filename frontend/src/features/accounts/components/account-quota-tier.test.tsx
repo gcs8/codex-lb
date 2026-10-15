@@ -1,15 +1,15 @@
 import { HttpResponse, http } from "msw";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { updateAccountQuotaTier } from "@/features/accounts/api";
 import { AccountQuotaTier } from "@/features/accounts/components/account-quota-tier";
 import { createAccountSummary } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 function renderTier(overrides: Parameters<typeof createAccountSummary>[0] = {}) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const onSave = vi.fn(updateAccountQuotaTier);
   const account = createAccountSummary({
     accountId: "acc_tier",
     planType: "pro",
@@ -20,12 +20,8 @@ function renderTier(overrides: Parameters<typeof createAccountSummary>[0] = {}) 
     capacityCreditsSecondaryMonthlyEquivalent: 75_600,
     ...overrides,
   });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AccountQuotaTier account={account} />
-    </QueryClientProvider>,
-  );
-  return { queryClient };
+  render(<AccountQuotaTier account={account} onSave={onSave} />);
+  return { onSave };
 }
 
 describe("AccountQuotaTier", () => {
@@ -52,8 +48,7 @@ describe("AccountQuotaTier", () => {
         });
       }),
     );
-    const { queryClient } = renderTier();
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { onSave } = renderTier();
 
     await user.click(screen.getByRole("button", { name: "20×" }));
     const date = screen.getByLabelText("Override ends");
@@ -64,9 +59,10 @@ describe("AccountQuotaTier", () => {
     await waitFor(() => expect(body).toHaveBeenCalledTimes(1));
     expect(body).toHaveBeenCalledWith({
       quotaTierMultiplier: 20,
+      quotaMonthlyCredits: null,
       quotaTierMultiplierExpiresAt: "2026-10-30T00:00:00.000Z",
     });
-    await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("acc_tier", { kind: "multiplier", value: 20 }, "2026-10-30T00:00:00.000Z");
   });
 
   it("clears an existing override back to the plan default", async () => {
@@ -88,8 +84,51 @@ describe("AccountQuotaTier", () => {
 
     await user.click(screen.getByRole("button", { name: "Use plan default" }));
     await waitFor(() =>
-      expect(body).toHaveBeenCalledWith({ quotaTierMultiplier: null, quotaTierMultiplierExpiresAt: null }),
+      expect(body).toHaveBeenCalledWith({
+        quotaTierMultiplier: null,
+        quotaMonthlyCredits: null,
+        quotaTierMultiplierExpiresAt: null,
+      }),
     );
+  });
+
+  it("saves a raw monthly credit allowance instead of a multiplier", async () => {
+    const user = userEvent.setup();
+    const body = vi.fn();
+    server.use(
+      http.put("/api/accounts/acc_tier/quota-tier", async ({ request }) => {
+        body(await request.json());
+        return HttpResponse.json({
+          accountId: "acc_tier",
+          quotaTierMultiplier: null,
+          quotaTierMultiplierExpiresAt: null,
+          quotaMonthlyCredits: 151200,
+          planQuotaTierMultiplier: 10,
+          effectiveQuotaTierMultiplier: 20,
+          effectiveQuotaMonthlyCredits: 151200,
+        });
+      }),
+    );
+    renderTier();
+
+    await user.click(screen.getByRole("button", { name: "Credits / month" }));
+    expect(screen.getByLabelText("Monthly credits")).toHaveAttribute("placeholder", "plan: 75,600");
+    await user.type(screen.getByLabelText("Monthly credits"), "151,200");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(body).toHaveBeenCalledWith({
+        quotaTierMultiplier: null,
+        quotaMonthlyCredits: 151200,
+        quotaTierMultiplierExpiresAt: null,
+      }),
+    );
+  });
+
+  it("opens in credits mode when the account has a credit override", () => {
+    renderTier({ quotaMonthlyCredits: 45_360, effectiveQuotaTierMultiplier: 6 });
+    expect(screen.getByRole("button", { name: "Credits / month" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Monthly credits")).toHaveValue("45360");
   });
 
   it("blocks saving an out-of-range multiplier", async () => {

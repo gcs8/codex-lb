@@ -653,16 +653,20 @@ class AccountsService:
         account_id: str,
         multiplier: float | None,
         expires_at: datetime | None,
+        monthly_credits: float | None = None,
     ) -> Account | None:
-        """Set or clear an account's subscription tier override (x Plus monthly quota)."""
-        if multiplier is None:
+        """Set or clear an account's subscription tier override: x Plus monthly quota
+        or a raw monthly credit allowance (exactly one, or neither to clear)."""
+        if multiplier is not None and monthly_credits is not None:
+            raise ValueError("set either a tier multiplier or monthly credits, not both")
+        if multiplier is None and monthly_credits is None:
             expires_at = None
         elif expires_at is not None:
             expires_utc = expires_at.astimezone(timezone.utc).replace(tzinfo=None) if expires_at.tzinfo else expires_at
             if expires_utc <= datetime.now(timezone.utc).replace(tzinfo=None):
                 raise ValueError("quota tier expiry must be in the future")
             expires_at = expires_utc
-        account = await self._repo.update_quota_tier(account_id, multiplier, expires_at)
+        account = await self._repo.update_quota_tier(account_id, multiplier, expires_at, monthly_credits)
         if account is not None:
             # Capacity feeds routing weights and the cached selection snapshot.
             get_account_selection_cache().invalidate()

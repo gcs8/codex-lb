@@ -83,3 +83,24 @@ def test_timezone_aware_values_compare_in_utc() -> None:
 
 def test_non_positive_override_is_ignored() -> None:
     assert effective_quota_tier_multiplier(_account("prolite", 0.0), NOW) == 5.0
+
+
+def test_raw_monthly_credits_override_is_equivalent_to_its_multiplier() -> None:
+    by_credits = _account("pro")
+    by_credits.quota_monthly_credits = 151_200.0  # grandfathered Pro 200 = 20 x 7,560
+    by_multiplier = _account("pro", 20.0)
+    assert effective_quota_tier_multiplier(by_credits, NOW) == pytest.approx(20.0)
+    for window in ("primary", "secondary"):
+        assert capacity_for_account(by_credits, window, NOW) == pytest.approx(
+            capacity_for_account(by_multiplier, window, NOW)
+        )
+    assert capacity_for_account(by_credits, "secondary", NOW) == pytest.approx(151_200.0 * 7 / 30)
+
+
+def test_raw_monthly_credits_respect_the_shared_expiry() -> None:
+    from app.core.usage import effective_quota_monthly_credits
+
+    account = _account("prolite", expires_at=NOW + timedelta(hours=1))
+    account.quota_monthly_credits = 50_000.0
+    assert effective_quota_monthly_credits(account, NOW) == pytest.approx(50_000.0)
+    assert effective_quota_monthly_credits(account, NOW + timedelta(hours=2)) == pytest.approx(37_800.0)

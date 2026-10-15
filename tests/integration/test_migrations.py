@@ -3483,7 +3483,7 @@ async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_p
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-tier.sqlite'}"
     parent = "20260918_000000_merge_scim_and_overflow_heads"
     revision = "20261015_000000_add_account_quota_tier_override"
-    names = {"quota_tier_multiplier", "quota_tier_multiplier_expires_at"}
+    names = {"quota_tier_multiplier", "quota_tier_multiplier_expires_at", "quota_monthly_credits"}
 
     def _cols(sync_conn) -> dict[str, dict[str, object]]:
         return {
@@ -3502,6 +3502,7 @@ async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_p
             assert await conn.run_sync(_cols) == {
                 "quota_tier_multiplier": {"nullable": True, "type": "FLOAT"},
                 "quota_tier_multiplier_expires_at": {"nullable": True, "type": "DATETIME"},
+                "quota_monthly_credits": {"nullable": True, "type": "FLOAT"},
             }
         config = _build_alembic_config(db_url)
         await to_thread.run_sync(lambda: command.downgrade(config, parent))

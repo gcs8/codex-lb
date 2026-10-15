@@ -23,7 +23,7 @@ The system MUST recognize account plan types returned by upstream ChatGPT auth a
 
 ### Requirement: Per-account subscription tier override
 
-The system MUST let an operator with account write permission set an optional per-account tier multiplier (x Plus monthly quota, between 0.1 and 100) with an optional end time, through `PUT /api/accounts/{account_id}/quota-tier`. While the override is active the account's weekly capacity MUST be `7560 x override x 7 / 30` and its 5 h capacity MUST scale by `override / plan multiplier`. After the end time, or when the override is cleared with `null`, the plan-derived capacity MUST apply. An override MUST NOT make a window applicable that the plan does not have. Account summaries MUST report the override, its end time, the plan multiplier and the effective multiplier.
+The system MUST let an operator with account write permission set an optional per-account tier override with an optional end time, through `PUT /api/accounts/{account_id}/quota-tier`, either as a multiplier of the Plus monthly quota (between 0.1 and 100) or as a raw monthly credit allowance (between 1 and 7,560,000), which is treated as `credits / 7560` x Plus. Setting both in one request MUST be rejected with HTTP 400. While the override is active the account's weekly capacity MUST be `7560 x override x 7 / 30` and its 5 h capacity MUST scale by `override / plan multiplier`. After the end time, or when the override is cleared with `null`, the plan-derived capacity MUST apply. An override MUST NOT make a window applicable that the plan does not have. Account summaries MUST report the override, its end time, the plan multiplier, the effective multiplier and the effective monthly credits.
 
 #### Scenario: Grandfathered Pro 200 until a date
 
@@ -36,3 +36,10 @@ The system MUST let an operator with account write permission set an optional pe
 
 - **WHEN** an operator sets a tier override whose end time has already passed
 - **THEN** the request is rejected with HTTP 400 and the account is unchanged
+
+#### Scenario: Raw monthly credits are equivalent to their multiplier
+
+- **GIVEN** an account whose stored `plan_type` is `prolite`
+- **WHEN** an operator sets its monthly credit allowance to `45360`
+- **THEN** its effective tier multiplier is `6.0`
+- **AND** it contributes `10584.0` weekly capacity (`45360 x 7 / 30`)

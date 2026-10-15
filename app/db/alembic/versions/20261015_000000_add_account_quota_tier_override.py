@@ -1,4 +1,4 @@
-"""Add an owner-set subscription tier override to accounts.
+"""Add an owner-set subscription tier override (multiplier or raw monthly credits) to accounts.
 
 Revision ID: 20261015_000000_add_account_quota_tier_override
 Revises: 20260918_000000_merge_scim_and_overflow_heads
@@ -24,6 +24,7 @@ depends_on = None
 _TABLE = "accounts"
 _MULTIPLIER = "quota_tier_multiplier"
 _EXPIRES_AT = "quota_tier_multiplier_expires_at"
+_MONTHLY_CREDITS = "quota_monthly_credits"
 
 
 def _columns() -> set[str]:
@@ -37,7 +38,7 @@ def upgrade() -> None:
     existing = _columns()
     if not existing:
         return
-    missing = [name for name in (_MULTIPLIER, _EXPIRES_AT) if name not in existing]
+    missing = [name for name in (_MULTIPLIER, _EXPIRES_AT, _MONTHLY_CREDITS) if name not in existing]
     if not missing:
         return
     with op.batch_alter_table(_TABLE) as batch_op:
@@ -45,10 +46,12 @@ def upgrade() -> None:
             batch_op.add_column(sa.Column(_MULTIPLIER, sa.Float(), nullable=True))
         if _EXPIRES_AT in missing:
             batch_op.add_column(sa.Column(_EXPIRES_AT, sa.DateTime(), nullable=True))
+        if _MONTHLY_CREDITS in missing:
+            batch_op.add_column(sa.Column(_MONTHLY_CREDITS, sa.Float(), nullable=True))
 
 
 def downgrade() -> None:
-    present = [name for name in (_EXPIRES_AT, _MULTIPLIER) if name in _columns()]
+    present = [name for name in (_MONTHLY_CREDITS, _EXPIRES_AT, _MULTIPLIER) if name in _columns()]
     if not present:
         return
     with op.batch_alter_table(_TABLE) as batch_op:

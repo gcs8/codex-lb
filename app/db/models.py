@@ -111,6 +111,9 @@ class Account(Base):
     # the plan default applies again.
     quota_tier_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
     quota_tier_multiplier_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Alternative to the multiplier: the account's raw monthly credit allowance.
+    # Mutually exclusive with quota_tier_multiplier; shares its expiry.
+    quota_monthly_credits: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

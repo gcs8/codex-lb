@@ -66,6 +66,8 @@ def monthly_credits_from_weekly(weekly_credits: float) -> float:
 
 MIN_QUOTA_TIER_MULTIPLIER = 0.1
 MAX_QUOTA_TIER_MULTIPLIER = 100.0
+MIN_QUOTA_MONTHLY_CREDITS = 1.0
+MAX_QUOTA_MONTHLY_CREDITS = PLUS_MONTHLY_QUOTA_CREDITS * 1000
 
 
 def plan_quota_tier_multiplier(plan_type: str | None) -> float | None:
@@ -74,10 +76,17 @@ def plan_quota_tier_multiplier(plan_type: str | None) -> float | None:
 
 
 def effective_quota_tier_multiplier(account: Account | None, now: datetime | None = None) -> float | None:
-    """The account's tier x Plus: an unexpired owner override, else its plan's default."""
+    """The account's tier x Plus: an unexpired owner override, else its plan's default.
+
+    The override is either a multiplier or a raw monthly credit allowance (taken as
+    ``credits / Plus monthly quota``); both share ``quota_tier_multiplier_expires_at``.
+    """
     if account is None:
         return None
     override = getattr(account, "quota_tier_multiplier", None)
+    monthly_credits = getattr(account, "quota_monthly_credits", None)
+    if (override is None or override <= 0) and monthly_credits is not None and monthly_credits > 0:
+        override = monthly_credits / PLUS_MONTHLY_QUOTA_CREDITS
     if override is not None and override > 0:
         expires_at = getattr(account, "quota_tier_multiplier_expires_at", None)
         current = now if now is not None else datetime.now(timezone.utc).replace(tzinfo=None)
@@ -88,6 +97,11 @@ def effective_quota_tier_multiplier(account: Account | None, now: datetime | Non
         if expires_at is None or current < expires_at:
             return float(override)
     return plan_quota_tier_multiplier(account.plan_type)
+
+
+def effective_quota_monthly_credits(account: Account | None, now: datetime | None = None) -> float | None:
+    multiplier = effective_quota_tier_multiplier(account, now)
+    return PLUS_MONTHLY_QUOTA_CREDITS * multiplier if multiplier is not None else None
 
 
 def capacity_for_account(account: Account | None, window: str, now: datetime | None = None) -> float | None:

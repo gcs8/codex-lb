@@ -989,13 +989,18 @@ class AccountsRepository:
         account_id: str,
         multiplier: float | None,
         expires_at: datetime | None,
+        monthly_credits: float | None = None,
     ) -> Account | None:
         async with sqlite_writer_section():
             result = await self._session.execute(
                 update(Account)
                 .where(Account.id == account_id)
                 .where(Account.delete_requested_at.is_(None))
-                .values(quota_tier_multiplier=multiplier, quota_tier_multiplier_expires_at=expires_at)
+                .values(
+                    quota_tier_multiplier=multiplier,
+                    quota_tier_multiplier_expires_at=expires_at,
+                    quota_monthly_credits=monthly_credits,
+                )
                 .returning(Account.id)
             )
             await self._session.commit()

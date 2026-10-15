@@ -16,6 +16,7 @@ import type {
   AccountSummary,
   AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
+import type { AccountQuotaTierSave } from "@/features/accounts/components/account-quota-tier";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import type {
   AccountProxyBindingRequest,
@@ -46,6 +47,7 @@ export type AccountDetailProps = {
     routingPolicy: AccountRoutingPolicy,
   ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onQuotaTierSave?: AccountQuotaTierSave;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
   onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
@@ -72,6 +74,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
+  onQuotaTierSave,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
   onProxyEndpointTest,
@@ -187,6 +190,7 @@ export function AccountDetail({
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
+        onQuotaTierSave={onQuotaTierSave}
       />
     </div>
   );
