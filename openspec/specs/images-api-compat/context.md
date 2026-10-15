@@ -102,3 +102,21 @@ and suppression. With no candidate visible, they default to Sol. Default account
 probes retain their separate Luna-then-5.5 selection. Visibility does not
 establish account entitlement. Existing errors are preserved; no host retry is
 performed. Public image models and explicit account-probe models are unchanged.
+
+## GPT Image 2 transparent output
+
+The local validator previously rejected all GPT Image 2 transparent requests.
+[Upstream PR #2593](https://github.com/Soju06/codex-lb/pull/2593) reports live
+generation and editing through the ChatGPT Responses image tool returning
+PNG/WebP assets with alpha-zero exterior pixels, including transparent corners
+and object openings. This fork verifies validation and byte forwarding with
+fixtures, not real-provider alpha-pixel quality. The validator permits these formats;
+JPEG remains invalid because it cannot represent transparency.
+
+For example, `model=gpt-image-2`, `background=transparent`, and
+`output_format=png` can pass local validation on a generation or edit route.
+Requested image settings and returned image bytes are preserved. Upstream
+availability and selected dimensions/quality can vary; local acceptance does
+not guarantee upstream success. Existing upstream errors remain visible and
+no model substitution or image post-processing is introduced. Internal host
+selection remains governed by the compatibility rules above.
