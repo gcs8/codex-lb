@@ -1968,7 +1968,7 @@ class LoadBalancer:
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
             plan_type=account.plan_type,
-            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
+            capacity_credits=usage_core.capacity_for_account(account, "secondary"),
             routing_policy=routing_policy,
             ignore_standard_quota=False,
         )
@@ -2386,7 +2386,7 @@ def _state_from_account(
             if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
                 rate_limited_cooldown_deadline = None
 
-    primary_capacity = usage_core.capacity_for_plan(account.plan_type, "primary")
+    primary_capacity = usage_core.capacity_for_account(account, "primary")
     if primary_capacity == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
@@ -2586,7 +2586,7 @@ def _state_from_account(
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
+    capacity_credits = usage_core.capacity_for_account(account, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
@@ -2865,7 +2865,7 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    monthly_capacity = usage_core.capacity_for_plan(account.plan_type, "monthly")
+    monthly_capacity = usage_core.capacity_for_account(account, "monthly")
     if monthly_entry is not None and monthly_capacity is not None:
         return monthly_entry
     return secondary_entry

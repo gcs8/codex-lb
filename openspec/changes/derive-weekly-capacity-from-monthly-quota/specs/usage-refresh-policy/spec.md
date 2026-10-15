@@ -18,3 +18,21 @@ The system MUST recognize account plan types returned by upstream ChatGPT auth a
 - **WHEN** the system resolves its secondary capacity
 - **THEN** the capacity is `17640.0` (`7560 x 10 x 7 / 30`)
 - **AND** the weekly credits pace reports the pool's monthly-quota equivalent as the weekly total `x 30 / 7`
+
+## ADDED Requirements
+
+### Requirement: Per-account subscription tier override
+
+The system MUST let an operator with account write permission set an optional per-account tier multiplier (x Plus monthly quota, between 0.1 and 100) with an optional end time, through `PUT /api/accounts/{account_id}/quota-tier`. While the override is active the account's weekly capacity MUST be `7560 x override x 7 / 30` and its 5 h capacity MUST scale by `override / plan multiplier`. After the end time, or when the override is cleared with `null`, the plan-derived capacity MUST apply. An override MUST NOT make a window applicable that the plan does not have. Account summaries MUST report the override, its end time, the plan multiplier and the effective multiplier.
+
+#### Scenario: Grandfathered Pro 200 until a date
+
+- **GIVEN** an account whose stored `plan_type` is `pro`
+- **WHEN** an operator sets its tier multiplier to `20` ending `2026-10-30T00:00:00Z`
+- **THEN** before that time the account contributes `35280.0` weekly capacity
+- **AND** from that time it contributes the plan's `17640.0`
+
+#### Scenario: Override end time must be in the future
+
+- **WHEN** an operator sets a tier override whose end time has already passed
+- **THEN** the request is rejected with HTTP 400 and the account is unchanged

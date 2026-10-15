@@ -3469,3 +3469,50 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
 
 
 # end scim/overflow merge lineage
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds two nullable columns without touching existing rows; downgrade
+    drops them; a half-applied schema upgrades idempotently; head stays single."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-tier.sqlite'}"
+    parent = "20260918_000000_merge_scim_and_overflow_heads"
+    revision = "20261015_000000_add_account_quota_tier_override"
+    names = {"quota_tier_multiplier", "quota_tier_multiplier_expires_at"}
+
+    def _cols(sync_conn) -> dict[str, dict[str, object]]:
+        return {
+            c["name"]: {"nullable": c["nullable"], "type": str(c["type"]).upper()}
+            for c in sa_inspect(sync_conn).get_columns("accounts")
+            if c["name"] in names
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {}
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {
+                "quota_tier_multiplier": {"nullable": True, "type": "FLOAT"},
+                "quota_tier_multiplier_expires_at": {"nullable": True, "type": "DATETIME"},
+            }
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {}
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN quota_tier_multiplier FLOAT"))
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert set(await conn.run_sync(_cols)) == names
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION == revision
+    finally:
+        await engine.dispose()

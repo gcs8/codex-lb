@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { usePermission } from "@/features/auth/hooks/use-auth";
+import { AccountQuotaTier } from "@/features/accounts/components/account-quota-tier";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
@@ -119,6 +120,8 @@ export function AccountActions({
           </Select>
         </div>
       ) : null}
+
+      <AccountQuotaTier account={account} disabled={busy || readOnly} />
 
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}

@@ -12,4 +12,5 @@ Subscription quotas are published per month (Plus = 7,560 credits; Pro 100 = 5x,
 
 - Affected spec: `usage-refresh-policy` (plan capacity values).
 - Affected code: `app/core/usage`, weekly pace, dashboard pace card. Routing weights scale uniformly per plan, so relative routing changes only where plans differ.
-- No migration. Per-account tier overrides (grandfathered 20x, Pro 500 25x) are a follow-up.
+- Per-account tier override (`quota_tier_multiplier`, optional `quota_tier_multiplier_expires_at`) for tiers the plan claim can't distinguish: grandfathered Pro 200 (20x until 2026-10-29), Pro 500 (25x). One nullable-column migration, rolling-safe.
+- Accounts page: plan tier control with presets 1/5/10/20/25x and an optional end date.

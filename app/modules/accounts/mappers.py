@@ -219,9 +219,9 @@ def _account_to_summary(
         effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
     )
     window_minutes_monthly = monthly_usage.window_minutes if monthly_usage is not None else None
-    capacity_primary = usage_core.capacity_for_plan(plan_type, "primary")
-    capacity_secondary = usage_core.capacity_for_plan(plan_type, "secondary")
-    capacity_monthly = usage_core.capacity_for_plan(plan_type, "monthly")
+    capacity_primary = usage_core.capacity_for_account(account, "primary")
+    capacity_secondary = usage_core.capacity_for_account(account, "secondary")
+    capacity_monthly = usage_core.capacity_for_account(account, "monthly")
     remaining_credits_primary = usage_core.remaining_credits_from_percent(
         primary_used_percent,
         capacity_primary,
@@ -299,6 +299,13 @@ def _account_to_summary(
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
+        capacity_credits_secondary_monthly_equivalent=(
+            usage_core.monthly_credits_from_weekly(capacity_secondary) if capacity_secondary is not None else None
+        ),
+        quota_tier_multiplier=account.quota_tier_multiplier,
+        quota_tier_multiplier_expires_at=account.quota_tier_multiplier_expires_at,
+        plan_quota_tier_multiplier=usage_core.plan_quota_tier_multiplier(plan_type),
+        effective_quota_tier_multiplier=usage_core.effective_quota_tier_multiplier(account),
         remaining_credits_secondary=remaining_credits_secondary,
         capacity_credits_monthly=capacity_monthly,
         remaining_credits_monthly=remaining_credits_monthly,

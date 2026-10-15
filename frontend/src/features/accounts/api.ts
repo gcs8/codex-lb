@@ -10,6 +10,8 @@ import {
   AccountLimitWarmupUpdateResponseSchema,
   AccountUpdateRequestSchema,
   AccountsResponseSchema,
+  AccountQuotaTierUpdateRequestSchema,
+  AccountQuotaTierUpdateResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
   AccountUsageResetConsumeRequestSchema,
@@ -98,6 +100,22 @@ export function updateAccountRoutingPolicy(
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
     AccountRoutingPolicyUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
+export function updateAccountQuotaTier(
+  accountId: string,
+  quotaTierMultiplier: number | null,
+  quotaTierMultiplierExpiresAt: string | null,
+) {
+  const payload = AccountQuotaTierUpdateRequestSchema.parse({
+    quotaTierMultiplier,
+    quotaTierMultiplierExpiresAt: quotaTierMultiplier == null ? null : quotaTierMultiplierExpiresAt,
+  });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/quota-tier`,
+    AccountQuotaTierUpdateResponseSchema,
     { body: payload },
   );
 }

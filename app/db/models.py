@@ -105,6 +105,12 @@ class Account(Base):
         server_default=text("'normal'"),
         nullable=False,
     )
+    # Owner-set subscription tier (x Plus monthly quota) when the auth plan claim
+    # can't tell tiers apart (e.g. grandfathered Pro 200 at 20x vs new at 10x,
+    # Pro 500 at 25x). NULL = derive from plan_type. After the optional expiry
+    # the plan default applies again.
+    quota_tier_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quota_tier_multiplier_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

@@ -64,6 +64,56 @@ def monthly_credits_from_weekly(weekly_credits: float) -> float:
     return weekly_credits * DAYS_PER_QUOTA_MONTH / DAYS_PER_QUOTA_WEEK
 
 
+MIN_QUOTA_TIER_MULTIPLIER = 0.1
+MAX_QUOTA_TIER_MULTIPLIER = 100.0
+
+
+def plan_quota_tier_multiplier(plan_type: str | None) -> float | None:
+    normalized = normalize_account_plan_type(plan_type)
+    return PLAN_QUOTA_TIER_MULTIPLIERS.get(normalized) if normalized else None
+
+
+def effective_quota_tier_multiplier(account: Account | None, now: datetime | None = None) -> float | None:
+    """The account's tier x Plus: an unexpired owner override, else its plan's default."""
+    if account is None:
+        return None
+    override = getattr(account, "quota_tier_multiplier", None)
+    if override is not None and override > 0:
+        expires_at = getattr(account, "quota_tier_multiplier_expires_at", None)
+        current = now if now is not None else datetime.now(timezone.utc).replace(tzinfo=None)
+        if expires_at is not None and expires_at.tzinfo is not None:
+            expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if current.tzinfo is not None:
+            current = current.astimezone(timezone.utc).replace(tzinfo=None)
+        if expires_at is None or current < expires_at:
+            return float(override)
+    return plan_quota_tier_multiplier(account.plan_type)
+
+
+def capacity_for_account(account: Account | None, window: str, now: datetime | None = None) -> float | None:
+    """Plan capacity for ``window``, scaled by the account's tier override.
+
+    Without an active override this is exactly ``capacity_for_plan``. With one,
+    weekly capacity is ``Plus monthly x override x 7/30`` and the 5 h capacity
+    scales by override / plan multiplier. Window applicability (a ``None`` or
+    ``0.0`` plan capacity) is never changed by an override.
+    """
+    plan_type = account.plan_type if account is not None else None
+    base = capacity_for_plan(plan_type, window)
+    if account is None or base is None or base == 0.0:
+        return base
+    multiplier = effective_quota_tier_multiplier(account, now)
+    plan_multiplier = plan_quota_tier_multiplier(plan_type)
+    if multiplier is None or multiplier == plan_multiplier:
+        return base
+    window_key = _normalize_window_key(window)
+    if window_key == "secondary":
+        return weekly_credits_from_monthly(PLUS_MONTHLY_QUOTA_CREDITS * multiplier)
+    if plan_multiplier:
+        return base * multiplier / plan_multiplier
+    return base
+
+
 PLAN_CAPACITY_CREDITS_SECONDARY = {
     # Free reports a single weekly window; keep its observed weekly value.
     "free": 1134.0,
@@ -196,7 +246,7 @@ def summarize_usage_window(
         if row.window_minutes is not None and row.window_minutes > 0:
             window_minutes_values.add(row.window_minutes)
         account = account_map.get(row.account_id)
-        capacity = capacity_for_plan(account.plan_type if account else None, window)
+        capacity = capacity_for_account(account, window)
         if row.used_percent is None or capacity is None:
             continue
         total_capacity += capacity
