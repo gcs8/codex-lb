@@ -790,6 +790,15 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
         return False
     if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
         return False
+    if continuity_state is not None and continuity_state.empty_prewarm_response_id == previous_response_id:
+        # Codex chains its first turn to an empty prewarm and sends only the
+        # new items, so dropping the anchor would drop the tools and developer
+        # context that only the prewarm carried.
+        return _facade()._input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.empty_prewarm_input_count,
+            stored_fingerprint=continuity_state.empty_prewarm_input_fingerprint,
+        )
     if (
         continuity_state is not None
         and continuity_state.last_completed_response_id == previous_response_id
@@ -832,6 +841,24 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
     continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
+
+
+def _record_websocket_empty_prewarm_completion(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+    response_id: str | None,
+) -> None:
+    """Record the context of an empty prewarm without treating it as turn progress."""
+    # A replayed prewarm keeps exposing its original id to the client, so the
+    # turn chained to it references that id, never the hidden upstream one.
+    continuity_state.empty_prewarm_response_id = request_state.replay_downstream_response_id or response_id
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.empty_prewarm_input_count = request_state.input_item_count
+        continuity_state.empty_prewarm_input_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.empty_prewarm_input_count = 0
+        continuity_state.empty_prewarm_input_fingerprint = None
 
 
 def _record_websocket_responses_lite_acceptance(
@@ -979,6 +1006,7 @@ def _websocket_precreated_retry_error_code(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
+    current_account_id: str | None = None,
 ) -> str | None:
     if request_state is None:
         return None
@@ -1011,8 +1039,6 @@ def _websocket_precreated_retry_error_code(
         return None
     if not request_state.request_text:
         return None
-    if request_state.replay_count >= 1:
-        return None
     if event_type not in {"error", "response.failed"}:
         return None
 
@@ -1022,6 +1048,22 @@ def _websocket_precreated_retry_error_code(
     )
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)
+    is_model_rejection = error_code == "model_not_found" or _is_account_model_unsupported_error(
+        code=error_code,
+        message=error_message,
+        model=request_state.model,
+    )
+    if request_state.replay_count >= 1 and not (
+        is_model_rejection
+        and request_state.model_rejection_replay_count == 0
+        and request_state.replay_count == request_state.auth_replay_count
+        and request_state.completed_forced_refresh_account_id == current_account_id
+        and current_account_id is not None
+    ):
+        # A completed auth refresh uses the generic replay budget, but its
+        # temporary account preference does not consume the single model
+        # rejection move. All other second replays remain bounded as before.
+        return None
     if _facade()._is_previous_response_not_found_error(
         code=error_code,
         param=error_param,
@@ -1034,11 +1076,7 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
     ):
         return None
-    if _is_account_model_unsupported_error(
-        code=error_code,
-        message=error_message,
-        model=request_state.model,
-    ):
+    if is_model_rejection and error_code != "model_not_found":
         # Any recognized response id means upstream has accepted this request,
         # even when response.created was not observed on this socket.  Do not
         # account-switch an error event that carries either response.id or a
@@ -1046,6 +1084,13 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+    if error_code == "model_not_found":
+        # The exact code proves the rejection is about the requested model.
+        # The common pre-created gate above has already ruled out acceptance,
+        # output, a second pending turn, and a second replay.
+        if _websocket_response_id(None, payload) is not None:
+            return None
+        return error_code
     if is_upstream_model_capacity_error(error_message):
         if error_code in {
             "rate_limit_exceeded",
@@ -1164,6 +1209,19 @@ def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestS
     ) and not _websocket_fresh_request_blocks_account_switch(request_state)
 
 
+def _websocket_request_requires_preferred_account(request_state: _WebSocketRequestState) -> bool:
+    """Whether continuity or file ownership makes the preferred account mandatory."""
+    return (
+        (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+        or request_state.replay_required_account_id is not None
+        or request_state.file_required_preferred_account
+        or (
+            request_state.affinity_policy.codex_session_source == "turn_state"
+            and request_state.preferred_account_id is not None
+        )
+    )
+
+
 def _prepare_websocket_request_state_for_auth_replay(
     request_state: _WebSocketRequestState,
     *,
@@ -1192,6 +1250,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
+    request_state.completed_forced_refresh_account_id = None
     request_state.replay_count += 1
     request_state.auth_replay_count += 1
     request_state.awaiting_response_created = True
@@ -2155,6 +2214,10 @@ def _pop_terminal_websocket_request_state(
             pending_requests.remove(request_state)
             return request_state
     return None
+
+
+def _upstream_websocket_payload_too_large_message() -> str:
+    return "Upstream websocket closed with code 1009 (message too big): a message exceeded a size limit."
 
 
 def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) -> str:

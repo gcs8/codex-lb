@@ -18,7 +18,11 @@ import pytest
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.compact import _sticky_key_for_compact_request
-from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_responses_request
+from app.modules.proxy.affinity import (
+    _AffinityPolicy,
+    _sticky_key_for_codex_control_request,
+    _sticky_key_for_responses_request,
+)
 from app.modules.proxy.affinity_observation import AFFINITY_SOURCES, AffinityObservation
 
 pytestmark = pytest.mark.unit
@@ -94,6 +98,9 @@ def test_every_emitted_source_is_in_the_documented_domain() -> None:
             _policy({"session_id": "sid-1"}),
             _policy({"thread-id": "thread-1"}),
             _policy({"x-codex-turn-state": "client-turn-owner"}),
+            _sticky_key_for_codex_control_request(
+                {}, codex_session_affinity=True, body_session_id="native-history-session"
+            ),
         )
     }
     emitted.add(

@@ -72,3 +72,30 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Revision progress
+
+Online Alembic execution emits `Migration started`, `Migration executed`, and
+`Migration failed` records with revision identity and direction. Terminal events
+include monotonic elapsed seconds. The migration CLI writes these logs to stderr
+and keeps its current-revision result on stdout. Startup uses application logging.
+
+For example, a start record followed by no terminal event identifies the revision
+still running or interrupted without cleanup. An executed event means Alembic
+finished that step; a later transaction failure can still roll it back. No event
+claims commit, row counts, or percent completion. These records exclude SQL,
+parameters, URLs, revision descriptions, and exception text. They do not redact
+existing exception handling elsewhere in the application.
+
+The small iterator adapter exists because Alembic's after-apply callback cannot
+report starts or failures. Real runner tests protect the integration with the
+pinned Alembic version. Background data phases and the benchmark policy in #1471
+remain separate from this partial implementation of #1470.
+
+## Guarded image rollback guidance
+
+Issue #1470 separates recovery hints from the general data-phase runner. The unknown-revision error explains metadata-only stamping without changing the fail-closed upgrade guard. The stamp command must run in a build containing both revisions because Alembic resolves the current revision before changing it.
+
+An optional added column is a possible compatible example, after testing old-image reads and writes on a disposable copy. Added constraints, changed data meanings or incomplete backfills can still invalidate that route. Stamping cannot reverse those changes or end an interrupted database transaction. Preserve current data and encryption keys before recovery.
+
+The [operator sequence](../../../docs/database.md#recovering-an-image-rollback-with-an-unknown-revision) covers transaction completion, backup, compatibility proof, exact revision selection and verification before traffic resumes. See [the requirement](spec.md#requirement-guarded-recovery-guidance-for-unknown-revisions).

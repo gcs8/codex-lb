@@ -20,6 +20,7 @@ from app.core.balancer.types import FailureClass, UpstreamError
 from app.db.models import AccountStatus
 from app.modules.proxy.helpers import (
     classify_upstream_failure,
+    is_model_scoped_upstream_rejection,
     is_upstream_burst_rejection,
     is_upstream_usage_limit_rejection,
 )
@@ -28,6 +29,26 @@ pytestmark = pytest.mark.unit
 
 
 class TestClassifyUpstreamFailure:
+    @pytest.mark.parametrize("http_status", [402, None, 500])
+    def test_deactivated_workspace_is_account_unavailable(self, http_status: int | None) -> None:
+        result = classify_upstream_failure(
+            error_code="deactivated_workspace",
+            error=UpstreamError(message="Workspace has been deactivated"),
+            http_status=http_status,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "account_unavailable"
+
+    @pytest.mark.parametrize("error_code", ["payment_required", "unknown_error"])
+    def test_bare_402_is_not_account_unavailable(self, error_code: str) -> None:
+        result = classify_upstream_failure(
+            error_code=error_code,
+            error=UpstreamError(message="Payment Required"),
+            http_status=402,
+            phase="connect",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_rate_limit_exceeded(self) -> None:
         result = classify_upstream_failure(
             error_code="rate_limit_exceeded",
@@ -73,6 +94,33 @@ class TestClassifyUpstreamFailure:
             phase="first_event",
         )
         assert result["failure_class"] == "quota"
+
+    def test_model_not_found_can_fail_over_before_output(self) -> None:
+        result = classify_upstream_failure(
+            error_code="model_not_found",
+            error=UpstreamError(message="The model `gpt-5.5` does not exist or you do not have access to it."),
+            http_status=404,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "retryable_transient"
+        assert (
+            failover_decision(
+                failure_class=result["failure_class"],
+                downstream_visible=False,
+                candidates_remaining=1,
+            )
+            == "failover_next"
+        )
+
+    def test_model_not_found_is_model_scoped_but_ordinary_invalid_request_is_not(self) -> None:
+        assert is_model_scoped_upstream_rejection(
+            "The model `gpt-5.5` does not exist or you do not have access to it.",
+            error_code="model_not_found",
+        )
+        assert not is_model_scoped_upstream_rejection(
+            "The request body is invalid.",
+            error_code="invalid_request_error",
+        )
 
     def test_server_error(self) -> None:
         result = classify_upstream_failure(
@@ -342,6 +390,33 @@ class TestUsageLimitClassificationDeliveryForm:
 
 
 class TestFailoverDecision:
+    @pytest.mark.parametrize(
+        ("downstream_visible", "owner_bound", "candidates_remaining", "expected"),
+        [
+            (False, False, 1, "failover_next"),
+            (True, False, 1, "surface"),
+            (False, True, 1, "surface"),
+            (False, False, 0, "surface"),
+        ],
+    )
+    def test_workspace_unavailable_respects_visibility_and_ownership(
+        self,
+        downstream_visible: bool,
+        owner_bound: bool,
+        candidates_remaining: int,
+        expected: str,
+    ) -> None:
+        assert (
+            failover_decision(
+                failure_class="account_unavailable",
+                downstream_visible=downstream_visible,
+                candidates_remaining=candidates_remaining,
+                owner_bound=owner_bound,
+                same_account_retry_available=True,
+            )
+            == expected
+        )
+
     def test_surface_when_downstream_visible(self) -> None:
         assert (
             failover_decision(

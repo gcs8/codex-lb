@@ -305,7 +305,8 @@ async def test_images_generations_no_accounts_returns_5xx(async_client):
 
 
 @pytest.mark.asyncio
-async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog):
+@pytest.mark.parametrize("route", ["/v1/images/generations", "/backend-api/codex/images/generations"])
+async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog, route):
     await _import_account(async_client, "acc_images_basic", "img-basic@example.com")
 
     captured: dict[str, object] = {}
@@ -317,7 +318,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
         captured["instructions"] = payload.instructions
         captured["input"] = payload.input
         captured["account_id"] = account_id
-        if payload.model == "gpt-5.5":
+        if payload.model in {"gpt-5.6-luna", "gpt-5.5"}:
             yield _sse(
                 {
                     "type": "response.failed",
@@ -370,7 +371,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
 
     with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
         response = await async_client.post(
-            "/v1/images/generations",
+            route,
             json={
                 "model": "gpt-image-2",
                 "prompt": "tiny red circle on white",
@@ -387,7 +388,8 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     assert body["usage"] == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
 
     # The host model is hidden from clients but appears in the upstream call.
-    assert captured["model"] == "gpt-5.6-luna"
+    assert captured["model"] == "gpt-5.6-sol"
+    assert captured["account_id"] == "acc_images_basic"
     tools = cast(list[Any], captured["tools"])
     image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
@@ -1089,7 +1091,9 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
         },
     )
 
-    assert captured["model"] == "gpt-5.6-luna"
+    assert captured["model"] == "gpt-5.6-sol"
+    assert captured["account_id"] == "acc_images_edit"
+    assert cast(list[dict[str, Any]], captured["tools"])[0]["model"] == "gpt-image-1"
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
@@ -1122,6 +1126,7 @@ async def test_backend_codex_images_edits_json_data_urls_round_trip(async_client
         captured["input"] = payload.input
         captured["tools"] = list(payload.tools)
         captured["account_id"] = account_id
+        captured["model"] = payload.model
         yield _sse(
             {
                 "type": "response.output_item.done",
@@ -1161,6 +1166,9 @@ async def test_backend_codex_images_edits_json_data_urls_round_trip(async_client
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
+    assert captured["model"] == "gpt-5.6-sol"
+    assert captured["account_id"] == "acc_images_edit_codex"
+    assert cast(list[dict[str, Any]], captured["tools"])[0]["model"] == "gpt-image-2"
     input_items = cast(list[dict[str, Any]], captured["input"])
     content = cast(list[dict[str, Any]], input_items[0]["content"])
     assert content[1]["type"] == "input_image"
