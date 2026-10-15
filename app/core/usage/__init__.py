@@ -28,15 +28,46 @@ PLAN_CAPACITY_CREDITS_PRIMARY = {
     "enterprise": 1500.0,
 }
 
+# Subscription quotas are published per MONTH: Plus = 7,560 credits, and each
+# plan is a multiple of Plus (Pro 100 / "prolite" = 5x, Pro 200 = 10x). The
+# 7-day ("secondary") window is the same allowance pro-rated to a week. These
+# monthly values were previously used directly as weekly capacity, which
+# overstated every weekly pool by 30/7 (~4.3x).
+PLUS_MONTHLY_QUOTA_CREDITS = 7560.0
+DAYS_PER_QUOTA_MONTH = 30.0
+DAYS_PER_QUOTA_WEEK = 7.0
+
+PLAN_QUOTA_TIER_MULTIPLIERS = {
+    "plus": 1.0,
+    "business": 1.0,
+    "team": 1.0,
+    "edu": 1.0,
+    "prolite": 5.0,
+    # Current Pro 200. Grandfathered Pro 200 (20x until 2026-10-29) is
+    # under-stated here, which only makes pacing conservative.
+    "pro": 10.0,
+    "enterprise": 10.0,
+}
+
+PLAN_QUOTA_CREDITS_PER_MONTH = {
+    plan: PLUS_MONTHLY_QUOTA_CREDITS * multiplier for plan, multiplier in PLAN_QUOTA_TIER_MULTIPLIERS.items()
+}
+
+
+def weekly_credits_from_monthly(monthly_credits: float) -> float:
+    """Pro-rate a monthly subscription quota to the 7-day usage window."""
+    return monthly_credits * DAYS_PER_QUOTA_WEEK / DAYS_PER_QUOTA_MONTH
+
+
+def monthly_credits_from_weekly(weekly_credits: float) -> float:
+    """Express a 7-day capacity as its monthly-quota equivalent."""
+    return weekly_credits * DAYS_PER_QUOTA_MONTH / DAYS_PER_QUOTA_WEEK
+
+
 PLAN_CAPACITY_CREDITS_SECONDARY = {
+    # Free reports a single weekly window; keep its observed weekly value.
     "free": 1134.0,
-    "plus": 7560.0,
-    "business": 7560.0,
-    "team": 7560.0,
-    "edu": 7560.0,
-    "pro": 50400.0,
-    "prolite": 37800.0,
-    "enterprise": 50400.0,
+    **{plan: weekly_credits_from_monthly(monthly) for plan, monthly in PLAN_QUOTA_CREDITS_PER_MONTH.items()},
 }
 
 PLAN_CAPACITY_CREDITS_MONTHLY = {

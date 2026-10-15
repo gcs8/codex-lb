@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil, isfinite
 from typing import Literal
 
-from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
+from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY, monthly_credits_from_weekly
 from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -234,6 +234,7 @@ def build_weekly_credit_pace(
 
     return WeeklyCreditPaceResponse(
         total_full_credits=total_full_credits,
+        total_full_credits_monthly_equivalent=monthly_credits_from_weekly(total_full_credits),
         total_actual_remaining_credits=total_actual_remaining_credits,
         total_expected_remaining_credits=total_expected_remaining_credits,
         actual_used_percent=actual_used_percent,

@@ -852,6 +852,8 @@
   "dashboard.weeklyPace.lines.poolCoversPace": "Pool이 다음 reset까지 최근 pace를 감당 가능",
   "dashboard.weeklyPace.lines.projectedShortfall": "reset 전 {{credits}} credits 부족 예상",
   "dashboard.weeklyPace.heroCreditsLeft": "{{credits}} 크레딧 남음",
+  "dashboard.weeklyPace.poolCapacityWeekly": "· 주 {{weekly}}",
+  "dashboard.weeklyPace.poolCapacityWeeklyMonthly": "· 주 {{weekly}} (월 ≈ {{monthly}})",
   "dashboard.weeklyPace.paceGap": "Pace 차이",
   "dashboard.weeklyPace.recommendations.addCapacity": "용량 추가",
   "dashboard.weeklyPace.recommendations.addProAccounts": "Pro 계정 {{count}}개 추가",

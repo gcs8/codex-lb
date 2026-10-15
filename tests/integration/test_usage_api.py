@@ -5,11 +5,22 @@ from datetime import timedelta
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.usage import capacity_for_plan
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import UsageRepository
+
+
+def _weekly(plan: str, fraction: float = 1.0) -> float:
+    """Plan weekly capacity x fraction. Credit figures in these tests were authored
+    against the old monthly-as-weekly constants; they scale with the plan's weekly
+    capacity (gcs8/codex-lb#7), while percentages are unchanged."""
+    capacity = capacity_for_plan(plan, "secondary")
+    assert capacity is not None
+    return capacity * fraction
+
 
 pytestmark = pytest.mark.integration
 
@@ -115,8 +126,8 @@ async def test_usage_window_secondary_uses_latest_window_minutes(async_client, d
     accounts = {item["accountId"]: item for item in payload["accounts"]}
     entry = accounts["acc_sec"]
     assert entry["remainingPercentAvg"] == pytest.approx(60.0)
-    assert entry["capacityCredits"] == pytest.approx(7560.0)
-    assert entry["remainingCredits"] == pytest.approx(4536.0)
+    assert entry["capacityCredits"] == pytest.approx(_weekly("plus"))
+    assert entry["remainingCredits"] == pytest.approx(_weekly("plus", 4536.0 / 7560.0))
 
 
 @pytest.mark.asyncio

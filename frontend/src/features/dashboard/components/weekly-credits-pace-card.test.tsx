@@ -210,6 +210,23 @@ const RUNWAY_PACE: WeeklyCreditPace = {
 };
 
 describe("WeeklyCreditsPaceCard runway layout", () => {
+  it("shows the pool capacity per week and as a monthly-quota equivalent", () => {
+    render(
+      <WeeklyCreditsPaceCard
+        pace={{ ...RUNWAY_PACE, totalFullCredits: 35_280, totalFullCreditsMonthlyEquivalent: 151_200 }}
+      />,
+    );
+
+    expect(screen.getByTestId("weekly-pool-capacity")).toHaveTextContent("· 35.28K / week (≈ 151.2K / month)");
+  });
+
+  it("falls back to the weekly pool capacity on backends without the monthly equivalent", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, totalFullCredits: 35_280 }} />);
+
+    expect(screen.getByTestId("weekly-pool-capacity")).toHaveTextContent("· 35.28K / week");
+    expect(screen.getByTestId("weekly-pool-capacity")).not.toHaveTextContent("month");
+  });
+
   it("paints the full runway content from a single overview payload", () => {
     render(<WeeklyCreditsPaceCard pace={RUNWAY_PACE} />);
 

@@ -90,6 +90,8 @@ class WeeklyCreditApiKeyAttribution(DashboardModel):
 
 class WeeklyCreditPaceResponse(DashboardModel):
     total_full_credits: float
+    # Monthly-quota equivalent of the 7-day pool (weekly x 30/7), for display.
+    total_full_credits_monthly_equivalent: float | None = None
     total_actual_remaining_credits: float
     total_expected_remaining_credits: float
     actual_used_percent: float

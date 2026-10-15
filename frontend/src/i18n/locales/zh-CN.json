@@ -852,6 +852,8 @@
   "dashboard.weeklyPace.lines.poolCoversPace": "Pool 可覆盖近期 pace 到下次 reset",
   "dashboard.weeklyPace.lines.projectedShortfall": "预计重置前短缺 {{credits}} 积分",
   "dashboard.weeklyPace.heroCreditsLeft": "剩余 {{credits}} 积分",
+  "dashboard.weeklyPace.poolCapacityWeekly": "· 每周 {{weekly}}",
+  "dashboard.weeklyPace.poolCapacityWeeklyMonthly": "· 每周 {{weekly}}（每月 ≈ {{monthly}}）",
   "dashboard.weeklyPace.paceGap": "节奏差距",
   "dashboard.weeklyPace.recommendations.addCapacity": "增加容量",
   "dashboard.weeklyPace.recommendations.addProAccounts": "增加 {{count}} 个 Pro 账户",

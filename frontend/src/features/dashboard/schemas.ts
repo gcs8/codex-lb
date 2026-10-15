@@ -123,6 +123,7 @@ const WeeklyCreditRunwayStatusSchema = z.enum(["safe", "tight", "runs_dry"]);
 
 const WeeklyCreditPaceSchema = z.object({
   totalFullCredits: z.number(),
+  totalFullCreditsMonthlyEquivalent: z.number().nullable().optional(),
   totalActualRemainingCredits: z.number(),
   totalExpectedRemainingCredits: z.number(),
   actualUsedPercent: z.number(),

@@ -481,9 +481,10 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
     assert payload["upstream_limits"][1] == {
         "limit_type": "credits",
         "limit_window": "7d",
-        "max_value": 15120,
-        "current_value": 3780,
-        "remaining_value": 11340,
+        # Two Plus accounts, 25% used of 1,764 weekly each (7,560/month x 7/30).
+        "max_value": 3528,
+        "current_value": 882,
+        "remaining_value": 2646,
         "model_filter": None,
         "reset_at": payload["upstream_limits"][1]["reset_at"],
         "source": "aggregate",
@@ -747,9 +748,10 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
         {
             "limit_type": "credits",
             "limit_window": "7d",
-            "max_value": 7560,
-            "current_value": 1890,
-            "remaining_value": 5670,
+            # One active Plus account, 25% used of 1,764 weekly.
+            "max_value": 1764,
+            "current_value": 441,
+            "remaining_value": 1323,
             "model_filter": None,
             "reset_at": payload["upstream_limits"][1]["reset_at"],
             "source": "aggregate",

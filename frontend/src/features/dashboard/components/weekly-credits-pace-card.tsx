@@ -284,6 +284,14 @@ function RunwayWeeklyCreditsPaceCard({
             <p className="text-xs tabular-nums text-muted-foreground">
               {t("dashboard.weeklyPace.heroCreditsLeft", { credits: formatCompactNumber(Math.max(0, headroomCredits)) })}
             </p>
+            <p className="text-xs tabular-nums text-muted-foreground" data-testid="weekly-pool-capacity">
+              {pace.totalFullCreditsMonthlyEquivalent != null
+                ? t("dashboard.weeklyPace.poolCapacityWeeklyMonthly", {
+                    weekly: formatCompactNumber(pace.totalFullCredits),
+                    monthly: formatCompactNumber(pace.totalFullCreditsMonthlyEquivalent),
+                  })
+                : t("dashboard.weeklyPace.poolCapacityWeekly", { weekly: formatCompactNumber(pace.totalFullCredits) })}
+            </p>
           </div>
           <p className="mt-1 text-xs tabular-nums text-muted-foreground">
             {etaHours != null ? (

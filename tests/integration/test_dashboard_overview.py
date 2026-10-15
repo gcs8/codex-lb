@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.usage import capacity_for_plan
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal
@@ -15,6 +16,16 @@ from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+
+
+def _weekly(plan: str, fraction: float = 1.0) -> float:
+    """Plan weekly capacity x fraction. Credit figures in these tests were authored
+    against the old monthly-as-weekly constants; they scale with the plan's weekly
+    capacity (gcs8/codex-lb#7), while percentages are unchanged."""
+    capacity = capacity_for_plan(plan, "secondary")
+    assert capacity is not None
+    return capacity * fraction
+
 
 pytestmark = pytest.mark.integration
 
@@ -117,8 +128,8 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     payload = response.json()
 
     assert payload["accounts"][0]["accountId"] == "acc_dash"
-    assert payload["accounts"][0]["capacityCreditsSecondary"] == pytest.approx(7560.0)
-    assert payload["accounts"][0]["remainingCreditsSecondary"] == pytest.approx(4536.0)
+    assert payload["accounts"][0]["capacityCreditsSecondary"] == pytest.approx(_weekly("plus"))
+    assert payload["accounts"][0]["remainingCreditsSecondary"] == pytest.approx(_weekly("plus", 4536.0 / 7560.0))
     assert payload["timeframe"] == {
         "key": "7d",
         "windowMinutes": 10080,
@@ -206,11 +217,11 @@ async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
     pace = response.json()["weeklyCreditPace"]
     assert pace is not None
     assert pace["headroomPercent"] == pytest.approx(5.0)
-    assert pace["headroomCredits"] == pytest.approx(2_520.0)
-    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(4_473.3727810651)
+    assert pace["headroomCredits"] == pytest.approx(_weekly("pro", 0.05))
+    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(_weekly("pro", 4_473.3727810651 / 50_400.0))
     assert pace["depletionEtaHours"] == pytest.approx(0.5633333333)
     assert pace["nextReliefInHours"] == pytest.approx(4.0)
-    assert pace["nextReliefCredits"] == pytest.approx(47_880.0)
+    assert pace["nextReliefCredits"] == pytest.approx(_weekly("pro", 0.95))
     assert pace["runwayStatus"] == "runs_dry"
     assert pace["status"] == "danger"
     assert pace["saturatedAccountCount"] == 0
@@ -556,7 +567,7 @@ async def test_dashboard_overview_weekly_primary_beats_no_data_secondary_placeho
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] == 10080
     assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(26.0)
-    assert account["remainingCreditsSecondary"] == pytest.approx(7560.0 * 0.26)
+    assert account["remainingCreditsSecondary"] == pytest.approx(_weekly("plus", 0.26))
 
 
 @pytest.mark.asyncio
@@ -657,12 +668,12 @@ async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup
     assert account["planType"] == "prolite"
     assert account["capacityCreditsPrimary"] == pytest.approx(1125.0)
     assert account["remainingCreditsPrimary"] == pytest.approx(1125.0)
-    assert account["capacityCreditsSecondary"] == pytest.approx(37800.0)
-    assert account["remainingCreditsSecondary"] == pytest.approx(37800.0)
+    assert account["capacityCreditsSecondary"] == pytest.approx(_weekly("prolite"))
+    assert account["remainingCreditsSecondary"] == pytest.approx(_weekly("prolite"))
     assert payload["summary"]["primaryWindow"]["capacityCredits"] == pytest.approx(1125.0)
     assert payload["summary"]["primaryWindow"]["remainingCredits"] == pytest.approx(1125.0)
-    assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(37800.0)
-    assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(37800.0)
+    assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(_weekly("prolite"))
+    assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(_weekly("prolite"))
 
 
 @pytest.mark.asyncio
@@ -755,10 +766,10 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
     assert pace["accountCount"] == 3
     assert pace["staleAccountCount"] == 1
     assert pace["inactiveAccountCount"] == 1
-    assert pace["totalFullCredits"] == pytest.approx(151_200.0)
+    assert pace["totalFullCredits"] == pytest.approx(_weekly("pro", 3))
     assert pace["actualUsedPercent"] == pytest.approx(73.333, abs=0.01)
     assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == pytest.approx(46_080.0, abs=1.0)
+    assert pace["scheduleGapCredits"] == pytest.approx(_weekly("pro", 46_080.0 / 50_400.0), abs=1.0)
     # No account has two fresh samples, so burn is unmeasured and headroom is
     # ~26.7%: the runway verdict is safe, which maps to legacy on_track.
     assert pace["runwayStatus"] == "safe"
@@ -813,7 +824,7 @@ async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slo
     assert pace["accountCount"] == 1
     assert pace["actualUsedPercent"] == pytest.approx(24.0)
     assert pace["scheduledUsedPercent"] == pytest.approx(17.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == pytest.approx(3_096.0, abs=1.0)
+    assert pace["scheduleGapCredits"] == pytest.approx(_weekly("pro", 3_096.0 / 50_400.0), abs=1.0)
     assert pace["projectedShortfallCredits"] == 0
     assert pace["forecastBurnRateCreditsPerHour"] == pytest.approx(0.0)
     assert pace["paceMultiplier"] == pytest.approx(0.0)
@@ -864,7 +875,7 @@ async def test_dashboard_projections_weekly_credit_pace_smooths_displayed_gap(
     assert pace["paceGapSmoothingMinutes"] == 240
     assert pace["actualUsedPercent"] == pytest.approx(24.0)
     assert pace["deltaPercent"] == pytest.approx(6.142, abs=0.01)
-    assert pace["scheduleGapCredits"] == pytest.approx(3_096.0, abs=1.0)
+    assert pace["scheduleGapCredits"] == pytest.approx(_weekly("pro", 3_096.0 / 50_400.0), abs=1.0)
     assert pace["smoothedDeltaPercent"] == pytest.approx(-5.857, abs=0.01)
     assert pace["smoothedScheduleGapCredits"] == 0
 
