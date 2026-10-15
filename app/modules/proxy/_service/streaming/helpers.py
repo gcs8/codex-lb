@@ -36,6 +36,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock
 from app.core.errors import (
@@ -610,7 +611,9 @@ def _classify_upstream_close(
     close_code: int | None,
     *,
     response_events_seen: int,
-) -> Literal["clean", "transient"]:
+) -> Literal["clean", "transient", "payload_too_large"]:
+    if is_upstream_message_too_big_close_code(close_code):
+        return "payload_too_large"
     if close_code == 1000 and response_events_seen == 0:
         # A clean websocket close before response.created does not prove that
         # the request was invalid.  The upstream can close a socket during a
@@ -1100,6 +1103,7 @@ def _is_account_neutral_request_rejection(
 
 def _is_model_scoped_rejection(
     *,
+    code: str,
     http_status: int | None,
     message: str | None,
 ) -> bool:
@@ -1118,14 +1122,13 @@ def _is_model_scoped_rejection(
     returned, so the caller keeps trying other accounts, whose entitlements may
     differ.
 
-    The normalized code is not part of the match. Upstream delivers this
-    rejection with neither ``code`` nor ``type`` on the streaming path, which
-    normalizes to ``upstream_error``; on other paths it arrives as
-    ``invalid_request_error``. Only the exact message shape decides membership.
+    ``model_not_found`` is authoritative. Code-less legacy rejections still
+    need the exact message shape because their streaming frames normalize to
+    ``upstream_error``; other non-400 errors remain account-scoped.
     """
-    if http_status is not None and http_status != 400:
+    if code != "model_not_found" and http_status is not None and http_status != 400:
         return False
-    return is_model_scoped_upstream_rejection(message)
+    return is_model_scoped_upstream_rejection(message, error_code=code)
 
 
 def _request_usage_refresh(proxy: Any, account_id: str) -> None:
@@ -1200,6 +1203,7 @@ async def _handle_stream_error(
         )
         return classified
     if _is_model_scoped_rejection(
+        code=code,
         http_status=http_status,
         message=error.get("message"),
     ):

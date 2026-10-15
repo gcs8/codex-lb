@@ -62,6 +62,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
@@ -418,6 +419,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _prepare_websocket_request_state_for_auth_replay,
     _record_or_defer_websocket_accepted_replay_health,
     _record_websocket_continuity_completion,
+    _record_websocket_empty_prewarm_completion,
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
     _release_websocket_response_create_gate,
@@ -428,10 +430,12 @@ from app.modules.proxy._service.websocket.helpers import (
     _sanitize_public_websocket_event_payload,
     _sanitize_websocket_connect_failure,
     _sanitize_websocket_previous_response_error,
+    _sanitize_websocket_previous_response_input_items,
     _sanitize_websocket_terminal_error_fields,
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_accepted_replay_can_switch_account,
     _websocket_accepted_replay_may_exclude_account,
     _websocket_auth_failure_requires_reauth,
@@ -454,6 +458,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_precreated_replay_fallback_error,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
+    _websocket_request_requires_preferred_account,
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
@@ -531,6 +536,11 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+# Pre-created rejections that name the requested model rather than the account:
+# the legacy entitlement alias and the exact upstream ``model_not_found`` code.
+# Both take the same bounded one-replacement replay and restore the same
+# retained envelope when replacement selection is exhausted.
+_WEBSOCKET_MODEL_REJECTION_REPLAY_CODES = frozenset({_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE, "model_not_found"})
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -1285,6 +1295,9 @@ async def _process_upstream_websocket_transport_end(
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
+    payload_too_large_close = is_upstream_message_too_big_close_code(message.close_code)
+    if payload_too_large_close:
+        message_error_code = "payload_too_large"
     # A classified local transport failure says nothing about whether an
     # already-sent response.create was accepted. Keep it account-neutral and
     # terminal: replay here could duplicate work, billing, or tool side effects.
@@ -1292,7 +1305,7 @@ async def _process_upstream_websocket_transport_end(
     if account_neutral:
         if any(state.last_downstream_sequence_number is not None for state in reader_owned):
             replay_refusal_reasons.append("sequenced_downstream_frame")
-    else:
+    elif not payload_too_large_close:
         replay_request_state = await _pop_replayable_precreated_websocket_request_state(
             reader_owned,
             pending_lock=anyio.Lock(),
@@ -1330,13 +1343,17 @@ async def _process_upstream_websocket_transport_end(
         pending_requests=reader_owned,
         pending_lock=anyio.Lock(),
         error_code=message_error_code or "stream_incomplete",
-        error_message=_upstream_websocket_disconnect_message(message),
+        error_message=(
+            _upstream_websocket_payload_too_large_message()
+            if payload_too_large_close
+            else _upstream_websocket_disconnect_message(message)
+        ),
         api_key=api_key,
         websocket=websocket,
         client_send_lock=client_send_lock,
         response_create_gate=response_create_gate,
         downstream_activity=downstream_activity,
-        penalize_account=not account_neutral,
+        penalize_account=not account_neutral and not payload_too_large_close,
         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
     )
     # A terminal receive can race the outer session cleanup, especially when
@@ -3235,14 +3252,16 @@ class _WebSocketMixin:
         client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
-            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_input_items = _sanitize_websocket_previous_response_input_items(
+                previous_response_input_items
+            )
             client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
                 previous_response_id=responses_payload.previous_response_id,
                 input_value=responses_payload.input,
                 continuity_state=continuity_state,
             )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _facade()._fingerprint_input_items(
                     previous_response_input_items
@@ -3294,7 +3313,9 @@ class _WebSocketMixin:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
             original_input_fingerprint = _facade()._fingerprint_input_items(original_input_items)
-            original_full_resend_payload = responses_payload
+            original_full_resend_payload = responses_payload.model_copy(
+                update={"input": _sanitize_websocket_previous_response_input_items(original_input_items)}
+            )
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,
@@ -3418,16 +3439,22 @@ class _WebSocketMixin:
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
-            _facade().logger.info(
-                "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
-                "previous_response_id=%s",
-                request_state.request_id,
-                previous_response_trimmed_input_count,
+            trimmed_to = (
                 len(cast(list[JsonValue], responses_payload.input))
                 if isinstance(responses_payload.input, list)
-                else None,
-                responses_payload.previous_response_id,
+                else None
             )
+            if trimmed_to != previous_response_trimmed_input_count:
+                # Stripping replayed tool-search ids keeps the item count; only a
+                # real prefix trim is worth an operator-visible log line.
+                _facade().logger.info(
+                    "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                    "previous_response_id=%s",
+                    request_state.request_id,
+                    previous_response_trimmed_input_count,
+                    trimmed_to,
+                    responses_payload.previous_response_id,
+                )
         if client_full_resend_payload is not None and not request_state.proxy_injected_previous_response_id:
             request_state.fresh_upstream_request_text = _facade()._response_create_text_with_size_guard(
                 client_full_resend_payload,
@@ -3683,16 +3710,7 @@ class _WebSocketMixin:
                 or forced_refresh_account_id
                 or request_state.preferred_account_id
             )
-            turn_state_owner_required = (
-                request_state.affinity_policy.codex_session_source == "turn_state"
-                and request_state.preferred_account_id is not None
-            )
-            require_preferred_account = (
-                (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
-                or request_state.replay_required_account_id is not None
-                or request_state.file_required_preferred_account
-                or turn_state_owner_required
-            )
+            require_preferred_account = _websocket_request_requires_preferred_account(request_state)
             try:
                 account = await proxy._select_websocket_connect_account(
                     deadline,
@@ -3738,6 +3756,8 @@ class _WebSocketMixin:
                 if last_failover_exc is not None and not require_preferred_account:
                     break
                 return None, None
+            if request_state.completed_forced_refresh_account_id != account.id:
+                request_state.completed_forced_refresh_account_id = None
             if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
                 request_state.force_refresh_account_id = None
                 if request_state.preferred_account_id == forced_refresh_account_id:
@@ -3748,7 +3768,7 @@ class _WebSocketMixin:
                 and account.id != request_state.precreated_replay_account_id
             )
             if selected_account_model_replacement:
-                # Preserve the rejected account's 400 only when selection
+                # Preserve the rejected account's original envelope only when selection
                 # cannot find a replacement. Once this replacement attempt
                 # starts, a connection/open failure belongs to the replacement.
                 _clear_websocket_precreated_replay_fallback(request_state)
@@ -4302,6 +4322,7 @@ class _WebSocketMixin:
             )
             if force_refresh and request_state.force_refresh_account_id == account.id:
                 request_state.force_refresh_account_id = None
+                request_state.completed_forced_refresh_account_id = account.id
 
             remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
@@ -5834,6 +5855,7 @@ class _WebSocketMixin:
             event_type=event_type,
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
+            current_account_id=account.id,
         )
         auth_error_code = _websocket_precreated_auth_error_code(
             request_state,
@@ -5879,6 +5901,7 @@ class _WebSocketMixin:
                 event_type=event_type,
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
+                current_account_id=account.id,
             )
         # An accepted lifecycle is classified only by the output-free capacity
         # rule and never takes the pre-created anchored branches below: its
@@ -5948,10 +5971,20 @@ class _WebSocketMixin:
                 # it, so the fresh body is re-sent to the same account on a
                 # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
-        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        if retry_error_code in _WEBSOCKET_MODEL_REJECTION_REPLAY_CODES:
             retry_text = None
             if not request_state.file_required_preferred_account:
                 retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is not None and not _websocket_accepted_replay_can_switch_account(request_state):
+                # Decide ownership only after the body prep: a proxy-injected
+                # anchor is released together with the pin it created, so a
+                # continuation turn whose retained full resend is
+                # account-neutral may still move. The owner left standing here
+                # is one the connect hard-requires (turn state), and re-sending
+                # the same model to the same owner can only be rejected again:
+                # surface the original envelope instead of excluding the owner
+                # and failing the reconnect closed as owner-unavailable.
+                retry_text = None
             if retry_text is not None:
                 request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
                 request_state.precreated_replay_account_id = account.id
@@ -5978,6 +6011,7 @@ class _WebSocketMixin:
                 )
                 request_state.request_text = retry_text
                 request_state.replay_count += 1
+                request_state.model_rejection_replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 request_state.response_event_count = 0
@@ -6087,12 +6121,19 @@ class _WebSocketMixin:
             and completed_usage is not None
             and completed_usage.output_tokens == 0
         )
-        if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
-            _record_websocket_continuity_completion(
-                continuity_state,
-                request_state=request_state,
-                response_id=response_id,
-            )
+        if event_type == "response.completed" and continuity_state is not None:
+            if completed_empty_prewarm:
+                _record_websocket_empty_prewarm_completion(
+                    continuity_state,
+                    request_state=request_state,
+                    response_id=response_id,
+                )
+            else:
+                _record_websocket_continuity_completion(
+                    continuity_state,
+                    request_state=request_state,
+                    response_id=response_id,
+                )
 
         if request_state is not None and event_type in {"response.failed", "error"}:
             if event_type == "error":
@@ -7017,6 +7058,13 @@ class _WebSocketMixin:
                 error_type=request_error_type,
                 error_param=request_error_param,
             )
+            if request_error_code == "payload_too_large":
+                if request_state.error_http_status_override is None:
+                    request_state.error_http_status_override = 400
+                if request_state.error_type_override is None:
+                    request_error_type = "invalid_request_error"
+                if request_state.error_param_override is None:
+                    request_error_param = "input"
             if index == last_index:
                 try:
                     _facade()._maybe_dump_oversized_response_create_request(
