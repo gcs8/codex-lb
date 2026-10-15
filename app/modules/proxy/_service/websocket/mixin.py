@@ -496,7 +496,6 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
-    is_model_scoped_upstream_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -4651,11 +4650,6 @@ class _WebSocketMixin:
         else:
             classified = await proxy._handle_websocket_connect_error(account, exc)
             failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
-        error = _parse_openai_error(exc.payload)
-        model_scoped_rejection = is_model_scoped_upstream_rejection(
-            error.message if error else None,
-            error_code=_normalize_error_code(error.code if error else None, error.type if error else None),
-        )
         candidates_remaining = max_attempts - attempt
         if confirmed_pre_dispatch:
             action = "surface" if require_preferred_account or candidates_remaining <= 0 else "failover_next"
@@ -4666,13 +4660,7 @@ class _WebSocketMixin:
                 failure_class=failure_class,
                 downstream_visible=False,
                 candidates_remaining=candidates_remaining,
-                # A required continuity or file owner cannot be excluded for a
-                # different account after rejecting the model: ``failover_next``
-                # would only re-select into the owner requirement and replace
-                # the owner's own envelope (a 404 ``model_not_found`` included)
-                # with owner unavailability. Capacity failures keep their
-                # existing owner-unavailable translation.
-                owner_bound=require_preferred_account and model_scoped_rejection,
+                owner_bound=require_preferred_account or request_state.replay_required_account_id is not None,
             )
         else:
             action = "surface"
