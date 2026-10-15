@@ -454,6 +454,7 @@ class NativeEgressWebSocket:
             maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
         )
         self._pending: dict[str, asyncio.Future[None]] = {}
+        self._receive_backpressure = "websocket_receive_window_v1" in client._capabilities
         self._command_sequence = 0
         self._completed = False
         self._closing = False
@@ -482,6 +483,14 @@ class NativeEgressWebSocket:
         item = await self._messages.get()
         if isinstance(item, BaseException):
             raise item
+        if self._receive_backpressure and item.kind in {"text", "binary"} and not self._completed:
+            # One receipt per consumed data message, never from the shared
+            # reader or pump. ACKs and cancellation don't require data slots.
+            await self._client._send_command(
+                self._process,
+                self._generation,
+                {"type": "websocket_consumed", "request_id": self._request_id},
+            )
         return item
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -640,19 +649,29 @@ class NativeEgressWebSocket:
                     if reason is not None and not isinstance(reason, str):
                         raise NativeEgressProtocolError("native websocket close reason is invalid")
                     self._remote_closed = True
-                    self._queue_message(
-                        NativeWebSocketMessage(
-                            kind="close",
-                            close_code=code,
-                            close_reason=reason,
+                    if not self._closing or not self._messages.full():
+                        self._queue_message(
+                            NativeWebSocketMessage(
+                                kind="close",
+                                close_code=code,
+                                close_reason=reason,
+                            )
                         )
-                    )
                     terminal_failure = NativeEgressTransportError(
                         "native websocket closed",
                         failure_phase="websocket_receive",
                     )
                     return
                 if event_type == "websocket_error":
+                    command_id = item.get("command_id")
+                    if item.get("failure_phase") == "websocket_send" and isinstance(command_id, str):
+                        # A peer-closed native transport may still own ordered
+                        # buffered receive data. Reject only this send, without
+                        # retiring that data or its eventual close event.
+                        future = self._pending.get(command_id)
+                        if future is not None and not future.done():
+                            future.set_exception(_websocket_error_from_event(item))
+                        continue
                     terminal_failure = _websocket_error_from_event(item)
                     return
                 if event_type == "cancelled":
@@ -747,6 +766,7 @@ class SubprocessNativeEgressClient:
         ] = {}
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        self._capabilities: frozenset[str] = frozenset()
         self._closed = False
 
     @property
@@ -907,6 +927,7 @@ class SubprocessNativeEgressClient:
                     ),
                     "proxy_url": request.proxy_url,
                     "interpret_responses": request.interpret_responses,
+                    **({"receive_backpressure": True} if "websocket_receive_window_v1" in self._capabilities else {}),
                 },
             )
             item = await asyncio.wait_for(events.get(), timeout=request.connect_timeout_seconds)
@@ -1041,6 +1062,7 @@ class SubprocessNativeEgressClient:
         missing = sorted(_REQUIRED_NATIVE_CAPABILITIES.difference(capabilities))
         if missing:
             raise NativeEgressProtocolError(f"native helper is missing required capabilities: {', '.join(missing)}")
+        self._capabilities = frozenset(capabilities)
 
     async def _send_command(
         self,
