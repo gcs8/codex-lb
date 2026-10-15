@@ -2147,7 +2147,8 @@ def transparent_upstream(monkeypatch):
 
 
 def assert_transparency_forwarding(payload, *, output_format: str, background: str, is_edit: bool) -> None:
-    assert payload.model == "gpt-5.6-luna"
+    # Keep the image-compatible host contract from #2537 in the composed tests.
+    assert payload.model == "gpt-5.6-sol"
     tool = cast(dict[str, Any], payload.tools[0])
     assert tool["model"] == "gpt-image-2"
     assert tool["quality"] == "high"
