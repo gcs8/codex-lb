@@ -1553,6 +1553,16 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "crudfifth",
+      "name": "CRUD5th-髙橋綱弥-",
+      "avatar_url": "https://avatars.githubusercontent.com/u/162397476?v=4",
+      "profile": "https://github.com/crudfifth",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
