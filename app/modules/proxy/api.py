@@ -134,7 +134,7 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.host_models import resolve_default_host_model
+from app.core.openai.host_models import resolve_image_host_model
 from app.core.openai.images import (
     DEFAULT_PUBLIC_IMAGE_MODEL,
     V1ImageResponse,
@@ -670,6 +670,9 @@ _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
 _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
+    "gpt-6-astra": 128_000,
+    "gpt-6-sol": 128_000,
+    "gpt-6-luna": 128_000,
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,
     "gpt-5.4-mini": 128_000,
@@ -1006,6 +1009,46 @@ class _RealtimeCallCodexControlAdapter:
 _PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
 
 
+_NATIVE_HISTORY_NOTES_CONTROL_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "alpha/history/v2/list_windows",
+        "alpha/history/v2/list_items",
+        "alpha/history/v2/read_item",
+        "alpha/history/v2/search_contents",
+        "alpha/notes/v2/thread_hint",
+        "alpha/notes/v2/list_files_by_prefix",
+        "alpha/notes/v2/read_file",
+        "alpha/notes/v2/search_contents",
+        "alpha/notes/v2/append_to_file",
+        "alpha/notes/v2/write_file",
+    }
+)
+
+
+def _native_history_notes_session_id(payload: bytes) -> str | None:
+    """Read the plaintext ``context.session_id`` a native history/notes body carries.
+
+    codex-rs (``ext/history-notes/src/backend.rs``) always injects a plaintext
+    ``context`` object into the JSON body; ``x-openai-encrypted-tool-arguments``
+    is a flag header and does not encrypt the body. This mirrors the
+    thread-goal convention: a body that is not a JSON object is rejected
+    here, while routing only consumes a valid nonblank identity and the
+    upstream protocol stays authoritative for every other payload rule. A
+    JSON object without a usable identity is therefore forwarded unpinned.
+    """
+    try:
+        parsed = json.loads(payload)
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="native history and notes payload must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="native history and notes payload must be a JSON object")
+    context = parsed.get("context")
+    session_id = context.get("session_id") if isinstance(context, dict) else None
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    return session_id
+
+
 async def _codex_control_proxy(
     request: Request,
     path: str,
@@ -1019,14 +1062,25 @@ async def _codex_control_proxy(
         capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
         if capability_transport_denial is not None:
             return capability_transport_denial
+    payload = await request.body() if request.method.upper() not in {"GET", "HEAD"} else None
+    body_session_id = None
+    allow_cross_account_retry = True
+    if path in _NATIVE_HISTORY_NOTES_CONTROL_PATHS and payload is not None:
+        # History and notes are account-local upstream state with no
+        # idempotency contract, so they never fail over to another account,
+        # even when the body carries no usable identity.
+        body_session_id = _native_history_notes_session_id(payload)
+        allow_cross_account_retry = False
     try:
         response = await context.service.codex_control_request(
             path,
             method=request.method,
-            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            payload=payload,
             query_params=list(request.query_params.multi_items()),
             headers=request.headers,
             codex_session_affinity=True,
+            body_session_id=body_session_id,
+            allow_cross_account_retry=allow_cross_account_retry,
             api_key=api_key,
             privacy_policy=adapter.privacy_policy,
             success_gate=adapter.success_gate,
@@ -1117,12 +1171,42 @@ async def codex_safety_arc(
 
 
 @router.post("/alpha/search")
+@v1_router.post("/alpha/search")
 async def codex_alpha_search(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "alpha/search", context, api_key)
+
+
+@router.post("/alpha/history/v2/list_windows")
+@router.post("/alpha/history/v2/list_windows/", include_in_schema=False)
+@router.post("/alpha/history/v2/list_items")
+@router.post("/alpha/history/v2/list_items/", include_in_schema=False)
+@router.post("/alpha/history/v2/read_item")
+@router.post("/alpha/history/v2/read_item/", include_in_schema=False)
+@router.post("/alpha/history/v2/search_contents")
+@router.post("/alpha/history/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/thread_hint")
+@router.post("/alpha/notes/v2/thread_hint/", include_in_schema=False)
+@router.post("/alpha/notes/v2/list_files_by_prefix")
+@router.post("/alpha/notes/v2/list_files_by_prefix/", include_in_schema=False)
+@router.post("/alpha/notes/v2/read_file")
+@router.post("/alpha/notes/v2/read_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/search_contents")
+@router.post("/alpha/notes/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/append_to_file")
+@router.post("/alpha/notes/v2/append_to_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/write_file")
+@router.post("/alpha/notes/v2/write_file/", include_in_schema=False)
+async def codex_native_history_notes(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    path = request.url.path.removeprefix("/backend-api/codex/").rstrip("/")
+    return await _codex_control_proxy(request, path, context, api_key)
 
 
 @router.get("/agent-identities/jwks")
@@ -3348,7 +3432,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = resolve_default_host_model()
+    host_model = resolve_image_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -3653,7 +3737,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = resolve_default_host_model()
+    host_model = resolve_image_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -8881,6 +8965,7 @@ async def _log_source_chat_completion(
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,
                 cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                reasoning_tokens=usage.reasoning_tokens if usage is not None else None,
                 cost_usd=(
                     cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
                 ),
@@ -9098,8 +9183,7 @@ async def _normalize_public_responses_stream(
     forward_unparseable_data: bool = False,
     preserve_native_failure_lifecycle: bool = False,
 ) -> AsyncIterator[str]:
-    stream = _normalize_reasoning_summary_stream(stream)
-    """Normalize the upstream SSE event stream for the public /v1 surface.
+    """Normalize upstream SSE for public-contract and native Codex clients.
 
     Args:
         stream: the upstream SSE event blocks (post-error-conversion).
@@ -9108,11 +9192,13 @@ async def _normalize_public_responses_stream(
             outside response.* and error, backfill terminal output from streamed
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
-            response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including vendor events are
-            forwarded verbatim and no synthesis happens — the Codex CLI
-            relies on the upstream's native event shape.
+            response.created. OpenAI-shaped /backend-api/codex/responses
+            requests can also enable this contract. When False (native Codex
+            requests), retain vendor events and skip public-only synthesis
+            and terminal output backfill. Shared normalization can still
+            rewrite reasoning, error, and terminal response payloads.
     """
+    stream = _normalize_reasoning_summary_stream(stream)
     terminal_seen = False
     done_seen = False
     unparseable_forwarded = False

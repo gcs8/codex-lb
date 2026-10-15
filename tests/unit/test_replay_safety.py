@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 
 from app.core.openai.requests import ResponsesRequest
@@ -14,6 +16,118 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+
+
+def _agent_followup() -> dict[str, JsonValue]:
+    return {
+        "type": "agent_message",
+        "id": "amsg_worker",
+        "author": "/root/worker",
+        "recipient": "/root",
+        "content": [
+            {"type": "input_text", "text": "Check completed."},
+            {"type": "encrypted_content", "encrypted_content": "opaque-agent-content"},
+        ],
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn_agent"},
+    }
+
+
+@pytest.mark.parametrize("history", ["assistant", "tool-manifest"])
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [
+        ("encrypted", True),
+        ("plaintext", True),
+        ("multiple", True),
+        ("blank-author", False),
+        ("blank-id", False),
+        ("missing-recipient", False),
+        ("empty-content", False),
+        ("unknown-content", False),
+        ("unknown-field", False),
+        ("malformed-metadata", False),
+        ("blank-ciphertext", False),
+    ],
+)
+def test_agent_followup_requires_same_owner_proof(history: str, shape: str, expected: bool) -> None:
+    agent = _agent_followup()
+    if shape == "plaintext":
+        agent.pop("id")
+        agent["content"] = [{"type": "input_text", "text": "Check completed."}]
+    elif shape == "blank-author":
+        agent["author"] = " "
+    elif shape == "blank-id":
+        agent["id"] = " "
+    elif shape == "missing-recipient":
+        agent.pop("recipient")
+    elif shape == "empty-content":
+        agent["content"] = []
+    elif shape == "unknown-content":
+        agent["content"] = [{"type": "input_file", "file_id": "file_owner"}]
+    elif shape == "unknown-field":
+        agent["future_owner_reference"] = "owner_1"
+    elif shape == "malformed-metadata":
+        agent["internal_chat_message_metadata_passthrough"] = "invalid"
+    elif shape == "blank-ciphertext":
+        agent["content"] = [{"type": "encrypted_content", "encrypted_content": " "}]
+    prior_output: list[JsonValue] = (
+        [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}]
+        if history == "assistant"
+        else [
+            {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "pwd"},
+            {"type": "custom_tool_call_output", "call_id": "call_1", "output": "/workspace"},
+        ]
+    )
+    input_items: list[JsonValue] = [{"role": "user", "content": "Check."}, *prior_output, agent]
+    if shape == "multiple":
+        input_items.append({**_agent_followup(), "id": "amsg_second"})
+    original = deepcopy(input_items)
+    for same_owner in (False, True):
+        result = (
+            responses_input_suffix_retains_prior_output(
+                input_items, stored_count=1, allow_same_owner_agent_messages=same_owner
+            )
+            if history == "assistant"
+            else responses_input_suffix_matches_pending_tool_calls(
+                input_items,
+                stored_count=1,
+                pending_tool_calls={"call_1": "custom_tool_call"},
+                allow_same_owner_agent_messages=same_owner,
+            )
+        )
+        assert result is (same_owner and expected)
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+    assert projection is not None
+    assert projection.input_items == input_items
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items})
+    assert input_items == original
+
+
+@pytest.mark.parametrize(
+    "case", ["missing-output", "missing-call", "missing-parallel-call", "unknown-manifest", "interleaved"]
+)
+def test_agent_followup_cannot_replace_missing_tool_context(case: str) -> None:
+    call: JsonValue = {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "pwd"}
+    output: JsonValue = {"type": "custom_tool_call_output", "call_id": "call_1", "output": "/workspace"}
+    suffix: list[JsonValue] = [call, output, _agent_followup()]
+    manifest = {"call_1": "custom_tool_call"}
+    if case == "missing-output":
+        suffix.pop(1)
+    elif case == "missing-call":
+        suffix.pop(0)
+    elif case == "missing-parallel-call":
+        manifest["call_2"] = "custom_tool_call"
+    elif case == "unknown-manifest":
+        manifest = {}
+    elif case == "interleaved":
+        suffix = [call, _agent_followup(), output]
+    input_items: list[JsonValue] = [{"role": "user", "content": "Check."}, *suffix]
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        input_items, stored_count=1, pending_tool_calls=manifest, allow_same_owner_agent_messages=True
+    )
+    assert not responses_input_suffix_retains_prior_output(
+        input_items, stored_count=1, allow_same_owner_agent_messages=True
+    )
 
 
 @pytest.mark.parametrize(
@@ -2105,6 +2219,130 @@ def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefi
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        (
+            "<heartbeat><automation_id>follow-pr</automation_id>"
+            "<current_time_iso>2026-09-04T13:58:17Z</current_time_iso></heartbeat>"
+        ),
+    ],
+)
+def test_host_automation_heartbeat_is_account_neutral_fresh_input(output: str) -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": output,
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+    assert responses_input_suffix_retains_prior_output(
+        [
+            {"role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            heartbeat,
+        ],
+        stored_count=1,
+    )
+
+
+@pytest.mark.parametrize("heartbeat_before_tool_pair", [True, False])
+def test_full_resend_tool_loop_manifest_rejects_host_automation_heartbeat(
+    heartbeat_before_tool_pair: bool,
+) -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    tool_pair: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_pending",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_pending", "output": "result"},
+    ]
+    suffix = [heartbeat, *tool_pair] if heartbeat_before_tool_pair else [*tool_pair, heartbeat]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        [{"role": "user", "content": "look that up"}, *suffix],
+        stored_count=1,
+        pending_tool_calls={"call_pending": "function_call"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "other_tool"),
+        ("namespace", "other_host"),
+        ("output", "ordinary tool output"),
+        ("output", "<heartbeat></heartbeat>"),
+        ("output", "<heartbeat><automation_id></automation_id></heartbeat>"),
+        ("output", "<heartbeat><message>not a host trigger</message></heartbeat>"),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><current_time_iso></current_time_iso></heartbeat>",
+        ),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><message>not a host trigger</message></heartbeat>",
+        ),
+        ("output", " <heartbeat><automation_id>follow-pr</automation_id></heartbeat>"),
+        ("output", "<heartbeat></heartbeat>trailing-data"),
+        ("output", "<heartbeat></heartbeat></heartbeat>"),
+        ("call_id", "call_owner_bound"),
+    ],
+)
+def test_noncanonical_host_automation_output_is_not_account_neutral(field: str, value: str) -> None:
+    heartbeat: dict[str, JsonValue] = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    heartbeat[field] = value
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+
+
+def test_host_automation_heartbeat_rejects_oversized_create_time() -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 10**400,
+        },
+    }
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
 
 
 def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_unsupported_prefix_item() -> None:

@@ -15743,6 +15743,60 @@ def test_verified_durable_full_resend_accepts_response_bound_pending_tool_calls(
     )
 
 
+@pytest.mark.parametrize("heartbeat_before_tool_pair", [True, False])
+def test_verified_durable_full_resend_rejects_host_automation_heartbeat_with_pending_tool_calls(
+    heartbeat_before_tool_pair: bool,
+) -> None:
+    stored_input_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": "look that up"},
+    ]
+    heartbeat: proxy_service.JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    tool_pair: list[proxy_service.JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "result"},
+    ]
+    full_input = [
+        *stored_input_items,
+        *([heartbeat, *tool_pair] if heartbeat_before_tool_pair else [*tool_pair, heartbeat]),
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": full_input}
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-tool-heartbeat",
+        canonical_kind="session_header",
+        canonical_key="sid-tool-heartbeat",
+        api_key_scope="__anonymous__",
+        account_id="acc-heartbeat",
+        owner_instance_id=None,
+        owner_epoch=3,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_tool_heartbeat",
+        latest_response_id="resp-tool-heartbeat",
+        latest_input_item_count=len(stored_input_items),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+        model="gpt-5.4",
+        latest_pending_tool_calls={"call-1": "function_call"},
+    )
+
+    assert http_bridge_streaming_module._verify_durable_full_resend(payload, durable_lookup) is None
+
+
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_explicit_prompt_cache_key(
     monkeypatch: pytest.MonkeyPatch,
@@ -24789,9 +24843,16 @@ async def test_process_http_bridge_upstream_text_retries_precreated_usage_limit(
 
 
 @pytest.mark.asyncio
-async def test_process_http_bridge_upstream_text_masks_failed_replay_usage_limit(
+async def test_process_http_bridge_upstream_text_preserves_failed_replay_usage_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failed pre-created replay must not hide a quota terminal behind a synthetic 502.
+
+    The upstream already answered with a status-bearing 429 quota envelope before
+    the replay ran, so the original terminal (code and reset metadata) is what
+    the client observes; no override is left behind for the terminal renderer to
+    rewrite.
+    """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-precreated-replay-failed",
@@ -24865,11 +24926,157 @@ async def test_process_http_bridge_upstream_text_masks_failed_replay_usage_limit
     assert isinstance(error, dict)
 
     assert payload["type"] == "response.failed"
+    assert error["code"] == "usage_limit_reached"
+    assert error["type"] == "usage_limit_reached"
+    assert error["resets_at"] == 1_778_790_595
+    assert error["resets_in_seconds"] == 14_555
+    # No synthetic rewrite survives: the terminal renderer keeps the upstream
+    # 429 contract instead of turning the quota answer into a 502.
+    assert request_state.error_http_status_override == 429
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert session.pending_requests == deque()
+    assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_masks_failed_replay_without_quota_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay failures without a status-bearing quota terminal stay fail-closed.
+
+    Same staging as the quota case, but the upstream terminal is a replayable
+    capacity/overload code that is not a status-bearing 429 quota answer: the
+    synthetic ``stream_incomplete`` 502 remains the only safe answer because
+    the original terminal proves nothing about the account.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-precreated-replay-failed-nonquota",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_limit_nonquota", None),
+        headers={"x-codex-turn-state": "http_turn_limit_nonquota"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_limit_nonquota",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-nonquota", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    handle_stream_error = AsyncMock()
+
+    async def failed_replay(target_session: proxy_service._HTTPBridgeSession) -> bool:
+        target_session.account = cast(Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE))
+        return False
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", failed_replay)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 503,
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "Upstream is temporarily overloaded",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    payload = proxy_service.parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+
+    assert payload["type"] == "response.failed"
     assert error["code"] == "stream_incomplete"
-    assert "usage_limit_reached" not in json.dumps(payload)
     assert request_state.error_http_status_override == 502
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line_break", ["\n", "\r\n", "\r"])
+async def test_process_http_bridge_upstream_text_settles_multi_line_error_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    line_break: str,
+) -> None:
+    """Port PR #2519's pending-request settlement and CR-only regression."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-multi-line-error",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="multi-line-error",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    error_text = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": None,
+                "message": "Response input messages must contain the word 'json' in some form to use "
+                "'text.format' of type 'json_object'.",
+                "param": "input",
+            },
+            "status": 400,
+        },
+        indent=2,
+    ).replace("\n", line_break)
+
+    await service._process_http_bridge_upstream_text(session, error_text)
+
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    terminal = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+    assert terminal is not None
+    assert "must contain the word 'json'" in terminal
+    assert proxy_service.parse_sse_data_json(terminal) is not None
 
 
 @pytest.mark.asyncio
@@ -33693,7 +33900,17 @@ async def test_http_bridge_submit_cooldown_suppression_spares_session_owned_by_c
         return allowed
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", gate)
-    monkeypatch.setattr(service, "_http_bridge_reacquire_snapshot", AsyncMock(return_value=(0, RoutingTunables())))
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_reacquire_snapshot",
+        AsyncMock(
+            return_value=http_bridge_request_submit_module._HTTPBridgeReacquireSnapshot(
+                concurrency_caps=http_bridge_request_submit_module.effective_account_concurrency_caps(),
+                fair_share_threshold_pct=0,
+                routing_tunables=RoutingTunables(),
+            )
+        ),
+    )
     monkeypatch.setattr(
         service,
         "_ensure_http_bridge_session_stream_lease_locked",
@@ -42768,7 +42985,9 @@ async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> 
 
 
 @pytest.mark.asyncio
-async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None:
+async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A remotely written abandonment tombstone arms no quarantine by
     # design; when planning served a cached view that predates it, the
     # payload was serialized with the injected anchor the tombstone
@@ -42776,16 +42995,36 @@ async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None
     # fail closed instead of dispatching the known-dead anchor once.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-submit-tombstone-gate")
+    session.durable_session_id = "durable-submit-tombstone-gate"
+    session.durable_owner_epoch = 4
+    session.last_completed_response_id = "resp_abandoned_anchor"
+    session.last_completed_response_account_id = "acc-bridge"
+    session.last_completed_input_count = 12
+    session.last_completed_input_prefix_fingerprint = "fingerprint-abandoned"
+    session.previous_response_ids.add("resp_abandoned_anchor")
     tombstone_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
         last_touched_monotonic=time.monotonic()
     )
     tombstone_state.consecutive_failures = 0
     tombstone_state.last_detail = "anchor_abandoned"
     cast(Any, service)._http_bridge_retry_circuits[session.key] = tombstone_state
+    clear_anchor = AsyncMock(return_value=SimpleNamespace())
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
+        clear_live_session_response_anchor_if_matches=clear_anchor,
     )
+
+    async def unregister_previous_response_id(
+        target_session: proxy_service._HTTPBridgeSession,
+        response_id: str,
+        **_kwargs: Any,
+    ) -> bool:
+        target_session.previous_response_ids.discard(response_id)
+        return True
+
+    unregister_anchor = AsyncMock(side_effect=unregister_previous_response_id)
+    monkeypatch.setattr(service, "_unregister_http_bridge_previous_response_id", unregister_anchor)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-submit-tombstone-gate",
         model="gpt-5.4",
@@ -42813,6 +43052,19 @@ async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None
     assert excinfo.value.status_code == 404
     assert "bridge_previous_response_not_found" in str(excinfo.value.payload), (
         "a proxy-injected anchor over an adopted tombstone must fail closed at submission"
+    )
+    clear_anchor.assert_awaited_once()
+    assert clear_anchor.await_args is not None
+    assert clear_anchor.await_args.kwargs["session_id"] == "durable-submit-tombstone-gate"
+    assert clear_anchor.await_args.kwargs["owner_epoch"] == 4
+    assert clear_anchor.await_args.kwargs["response_id"] == "resp_abandoned_anchor"
+    unregister_anchor.assert_awaited_once()
+    assert session.last_completed_response_id is None, (
+        "the refusal must retire the dead live carrier so the next full resend cannot receive it again"
+    )
+    assert "resp_abandoned_anchor" not in session.previous_response_ids
+    assert tombstone_state.last_detail == "anchor_abandoned", (
+        "carrier retirement must preserve the tombstone that still guards delta-only follow-ups"
     )
 
 

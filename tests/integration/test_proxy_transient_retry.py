@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from sqlalchemy import select
 
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
@@ -30,7 +31,7 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation
 from app.db.session import SessionLocal
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -830,6 +831,148 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("owner_bound", [False, True])
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_stream_deactivated_workspace_scopes_exclusion_and_failover(
+    async_client,
+    monkeypatch,
+    path: str,
+    owner_bound: bool,
+    keyed: bool,
+):
+    account_a_id = await _import_account(async_client, "acc_workspace_a", "workspace-a@example.test")
+    account_b_id = await _import_account(async_client, "acc_workspace_b", "workspace-b@example.test")
+    seen_account_ids: list[str | None] = []
+    headers = {}
+    if keyed:
+        settings_response = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+        assert settings_response.status_code == 200
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "workspace-failover",
+                "limits": [
+                    {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000},
+                ],
+            },
+        )
+        assert created.status_code == 200
+        key_id = created.json()["id"]
+        headers = {"authorization": f"Bearer {created.json()['key']}"}
+        original_mark = proxy_module.LoadBalancer.mark_permanent_failure
+
+        async def mark_after_settlement(self, account, code):
+            async with SessionLocal() as session:
+                pending = await session.scalar(
+                    select(ApiKeyUsageReservation.id).where(
+                        ApiKeyUsageReservation.api_key_id == key_id,
+                        ApiKeyUsageReservation.status == "reserved",
+                    )
+                )
+                assert pending is None
+            return await original_mark(self, account, code)
+
+        monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", mark_after_settlement)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_workspace_a":
+            raise ProxyResponseError(
+                402,
+                openai_error("deactivated_workspace", "Workspace has been deactivated"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_workspace_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    if owner_bound:
+        payload["input"] = [{"type": "reasoning", "id": "rs_workspace", "encrypted_content": "owner-bound"}]
+    response = await async_client.post(path, json=payload, headers=headers)
+    if owner_bound:
+        assert seen_account_ids == ["acc_workspace_a"]
+        if response.status_code == 402:
+            assert response.json()["error"]["code"] == "deactivated_workspace"
+        else:
+            assert response.status_code == 200
+            events = _extract_events(response.text.splitlines())
+            assert [e["response"]["error"]["code"] for e in events if e.get("type") == "response.failed"] == [
+                "deactivated_workspace"
+            ]
+    else:
+        assert response.status_code == 200
+        events = _extract_events(response.text.splitlines())
+        assert [e["response"]["id"] for e in events if e.get("type") == "response.completed"] == ["resp_workspace_ok"]
+        assert not [e for e in events if e.get("type") == "response.failed"]
+        assert seen_account_ids == ["acc_workspace_a", "acc_workspace_b"]
+        second = await async_client.post(path, json=payload, headers=headers)
+        assert second.status_code == 200
+        assert seen_account_ids == ["acc_workspace_a", "acc_workspace_b", "acc_workspace_b"]
+
+    async with SessionLocal() as session:
+        unavailable = await session.get(Account, account_a_id)
+        healthy = await session.get(Account, account_b_id)
+        assert unavailable is not None and healthy is not None
+        assert unavailable.status == AccountStatus.DEACTIVATED
+        assert unavailable.deactivation_reason == "Workspace has been deactivated"
+        assert healthy.status == AccountStatus.ACTIVE
+        assert healthy.deactivation_reason is None
+
+
+@pytest.mark.asyncio
+async def test_stream_bare_402_does_not_deactivate_account(async_client, monkeypatch):
+    account_id = await _import_account(async_client, "acc_payment", "payment@example.test")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        raise ProxyResponseError(402, openai_error("payment_required", "Payment Required"), failure_phase="status")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "hi", "stream": True})
+    assert response.status_code == 402
+    assert response.json()["error"]["code"] == "payment_required"
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.ACTIVE
+        assert account.deactivation_reason is None
+
+
+@pytest.mark.asyncio
+async def test_compact_deactivated_workspace_fails_over_once(async_client, monkeypatch):
+    account_a_id = await _import_account(async_client, "acc_workspace_compact_a", "compact-a@example.test")
+    account_b_id = await _import_account(async_client, "acc_workspace_compact_b", "compact-b@example.test")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_workspace_compact_a":
+            raise ProxyResponseError(
+                402,
+                openai_error("deactivated_workspace", "Workspace has been deactivated"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": []},
+    )
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+    assert seen_account_ids == ["acc_workspace_compact_a", "acc_workspace_compact_b"]
+    async with SessionLocal() as session:
+        unavailable = await session.get(Account, account_a_id)
+        healthy = await session.get(Account, account_b_id)
+        assert unavailable is not None and healthy is not None
+        assert unavailable.status == AccountStatus.DEACTIVATED
+        assert unavailable.deactivation_reason == "Workspace has been deactivated"
+        assert healthy.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
     account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
@@ -868,6 +1011,66 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_delivery", ["http_status", "sse_event"])
+async def test_stream_previsible_quota_failure_is_fail_closed_for_nonportable_replay(
+    async_client,
+    monkeypatch,
+    failure_delivery,
+):
+    """A dispatched nonportable body must not cross accounts after quota failure."""
+    await _import_account(async_client, "acc_stream_previsible_quota_a", "stream_previsible_quota_a@example.com")
+    await _import_account(async_client, "acc_stream_previsible_quota_b", "stream_previsible_quota_b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_previsible_quota_a":
+            if failure_delivery == "http_status":
+                raise ProxyResponseError(
+                    429,
+                    openai_error("usage_limit_reached", "usage limit reached"),
+                    failure_phase="status",
+                )
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": "usage_limit_reached",
+                            "message": "usage limit reached",
+                        },
+                    },
+                }
+            )
+            return
+        yield _success_sse_event("resp_previsible_quota_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "continue this conversation",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "prior-message-id",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                }
+            ],
+            "stream": True,
+            "prompt_cache_key": "previsible-quota-sticky",
+        },
+    )
+
+    assert response.status_code == (429 if failure_delivery == "http_status" else 200)
+    assert "response.completed" not in response.text
+    assert seen_account_ids == ["acc_stream_previsible_quota_a"]
+
+
 async def test_stream_code_less_429_retries_same_account_then_succeeds(async_client, monkeypatch):
     """Code-less 429 (upstream burst) on an owner-bound payload backs off and retries the owner.
 
@@ -1038,6 +1241,305 @@ async def test_native_codex_stream_code_less_429_retry_success_emits_no_capacity
     assert all(e.get("status") != "waiting_for_account_capacity" for e in events)
     assert seen_account_ids == ["acc_stream_burst_native_ok", "acc_stream_burst_native_ok"]
     assert 1.0 in slept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_delivery", ["sse", "status"])
+@pytest.mark.parametrize("failure_code", ["usage_limit_reached", "quota_exceeded"])
+async def test_stream_first_event_429_with_owner_state_transparently_fails_over(
+    async_client, monkeypatch, failure_delivery, failure_code
+):
+    """A rejected request must not pin its replay to the exhausted account."""
+    await _import_account(async_client, "acc_sticky_429_a", "sticky429a@example.com")
+    await _import_account(async_client, "acc_sticky_429_b", "sticky429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        seen_inputs.append(payload.input)
+        assert payload.model == "gpt-5.6-sol"
+        assert payload.reasoning is not None
+        assert payload.reasoning.effort == "xhigh"
+        if account_id == "acc_sticky_429_a":
+            if failure_delivery == "status":
+                raise ProxyResponseError(
+                    429,
+                    openai_error(failure_code, "usage limit reached"),
+                    failure_phase="status",
+                )
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": failure_code, "message": "usage limit reached"}},
+                }
+            )
+            return
+        yield _success_sse_event("resp_sticky_429_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "sticky-usage-limit-failover",
+        "instructions": "hi",
+        "input": [
+            {
+                "type": "message",
+                "id": "msg_first_user",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "first question"}],
+            },
+            {
+                "type": "message",
+                "id": "msg_previous_answer",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "previous answer"}],
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_owner",
+                "encrypted_content": "owner-bound",
+                "summary": [],
+            },
+            {
+                "type": "message",
+                "id": "msg_owner",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            },
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [event for event in events if event.get("type") == "response.completed"]
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert len(failed) == 0
+    assert seen_account_ids[:2] == ["acc_sticky_429_a", "acc_sticky_429_b"]
+    first_input = seen_inputs[0]
+    second_input = seen_inputs[1]
+    assert isinstance(first_input, list)
+    assert isinstance(second_input, list)
+    assert [item.get("type") for item in first_input if isinstance(item, dict)] == [
+        "message",
+        "message",
+        "reasoning",
+        "message",
+    ]
+    assert [item.get("type") for item in second_input if isinstance(item, dict)] == [
+        "message",
+        "message",
+        "message",
+    ]
+    assert all(isinstance(item, dict) and "id" not in item for item in second_input)
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_429_does_not_replay_unanchored_delta_owner_state(async_client, monkeypatch):
+    """Owner bookkeeping alone is not evidence of a complete portable transcript."""
+    await _import_account(async_client, "acc_delta_429_a", "delta429a@example.com")
+    await _import_account(async_client, "acc_delta_429_b", "delta429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_delta_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_delta_should_not_replay")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "sticky-delta-usage-limit",
+        "instructions": "hi",
+        "input": [
+            {
+                "type": "reasoning",
+                "id": "rs_owner",
+                "encrypted_content": "owner-bound",
+                "summary": [],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}],
+            },
+        ],
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+
+    assert response.status_code == 429
+    assert response.json().get("error", {}).get("code") == "usage_limit_reached"
+    assert seen_account_ids == ["acc_delta_429_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_429_replays_scheduled_heartbeat_on_another_account(async_client, monkeypatch):
+    """Codex host heartbeats are fresh input, not an orphaned upstream tool result."""
+    await _import_account(async_client, "acc_heartbeat_429_a", "heartbeat429a@example.com")
+    await _import_account(async_client, "acc_heartbeat_429_b", "heartbeat429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+    seen_inputs: list[object] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        seen_inputs.append(payload.input)
+        if account_id == "acc_heartbeat_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_heartbeat_429_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    def heartbeat_item(item_id: str, turn_id: str) -> dict:
+        return {
+            "type": "function_call_output",
+            "id": item_id,
+            "name": "automation_update",
+            "namespace": "codex_app",
+            "output": (
+                "<heartbeat><automation_id>follow-pr</automation_id>"
+                "<current_time_iso>2026-09-04T13:58:17Z</current_time_iso></heartbeat>"
+            ),
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": turn_id,
+                "create_time": 1_788_526_697,
+            },
+        }
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "scheduled-heartbeat-failover",
+        "instructions": "monitor the pull request",
+        "input": [
+            {"type": "message", "id": "msg_user", "role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "id": "msg_first_answer",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "No actionable change."}],
+            },
+            heartbeat_item("host_heartbeat_old", "turn_old"),
+            {
+                "type": "message",
+                "id": "msg_latest_answer",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_owner",
+                "encrypted_content": "owner-bound",
+                "summary": [],
+            },
+            heartbeat_item("host_heartbeat_current", "turn_current"),
+        ],
+        "stream": True,
+    }
+
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert not [event for event in events if event.get("type") == "response.failed"]
+    assert seen_account_ids[:2] == ["acc_heartbeat_429_a", "acc_heartbeat_429_b"]
+    replay_input = seen_inputs[1]
+    assert isinstance(replay_input, list)
+    assert all(isinstance(item, dict) and "id" not in item for item in replay_input)
+    assert all(item.get("type") != "reasoning" for item in replay_input if isinstance(item, dict))
+    replay_message_roles = [
+        item.get("role") for item in replay_input if isinstance(item, dict) and item.get("type") in (None, "message")
+    ]
+    assert replay_message_roles == ["user", "assistant", "assistant"]
+    replay_heartbeats = [
+        item for item in replay_input if isinstance(item, dict) and item.get("namespace") == "codex_app"
+    ]
+    assert len(replay_heartbeats) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_429_does_not_replay_malformed_scheduled_heartbeat(
+    async_client,
+    monkeypatch,
+):
+    await _import_account(async_client, "acc_bad_heartbeat_429_a", "bad-heartbeat429a@example.com")
+    await _import_account(async_client, "acc_bad_heartbeat_429_b", "bad-heartbeat429b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_bad_heartbeat_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_bad_heartbeat_should_not_replay")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.6-sol",
+        "reasoning": {"effort": "xhigh"},
+        "prompt_cache_key": "malformed-scheduled-heartbeat",
+        "instructions": "monitor the pull request",
+        "input": [
+            {"type": "message", "id": "msg_user", "role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "id": "msg_answer",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            {
+                "type": "function_call_output",
+                "id": "host_heartbeat_malformed",
+                "name": "automation_update",
+                "namespace": "codex_app",
+                "output": "<heartbeat></heartbeat>trailing-data",
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn_current",
+                    "create_time": 1_788_526_697,
+                },
+            },
+        ],
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+
+    assert response.status_code == 429
+    assert response.json().get("error", {}).get("code") == "usage_limit_reached"
+    assert seen_account_ids == ["acc_bad_heartbeat_429_a"]
 
 
 @pytest.mark.asyncio
@@ -1215,6 +1717,60 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
 
 
 @pytest.mark.asyncio
+async def test_stream_model_not_found_keeps_account_health_and_valid_neighbour_working(async_client, monkeypatch):
+    """A globally unknown model may exhaust failover but cannot bench its accounts."""
+    account_id_1 = await _import_account(async_client, "acc_model_not_found_a", "model-not-found-a@example.com")
+    account_id_2 = await _import_account(async_client, "acc_model_not_found_b", "model-not-found-b@example.com")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        if payload.model == "gpt-5.5":
+            raise ProxyResponseError(
+                404,
+                openai_error(
+                    "model_not_found",
+                    "The model `gpt-5.5` does not exist or you do not have access to it.",
+                    error_type="invalid_request_error",
+                ),
+                failure_phase="status",
+            )
+        yield _success_sse_event()
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    rejected = {"model": "gpt-5.5", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=rejected) as response:
+        rejected_lines = [line async for line in response.aiter_lines() if line]
+
+    assert set(seen_account_ids) == {"acc_model_not_found_a", "acc_model_not_found_b"}
+    assert response.status_code == 404
+    assert json.loads("\n".join(rejected_lines)) == {
+        "error": {
+            "code": "model_not_found",
+            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+            "type": "invalid_request_error",
+        }
+    }
+    assert not any(event.get("type") == "response.completed" for event in _extract_events(rejected_lines))
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    for imported_account_id in (account_id_1, account_id_2):
+        runtime = service._load_balancer._runtime.get(imported_account_id)
+        assert runtime is None or runtime.error_count == 0
+        assert runtime is None or runtime.last_error_at is None
+
+    valid = {"model": "gpt-5.6", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=valid) as response:
+        valid_lines = [line async for line in response.aiter_lines() if line]
+
+    assert any(event.get("type") == "response.completed" for event in _extract_events(valid_lines))
+
+
+@pytest.mark.asyncio
 async def test_stream_genuine_400_failover_still_records_error_control(async_client, monkeypatch):
     """Control for the neutrality regression above: the same route and status
     with a non-entitlement message must keep penalizing, proving the runtime
@@ -1309,6 +1865,7 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
                     "error": {
                         "code": "rate_limit_exceeded",
                         "message": "slow down",
+                        "resets_at": 1_700_003_600,
                     },
                 },
             }
@@ -1326,6 +1883,7 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
     last_event = events[-1] if events else {}
     error = last_event.get("response", {}).get("error", {})
     assert error.get("code") != "no_accounts", "Client received generic no_accounts instead of actual error"
+    assert error.get("resets_at") == 1_700_003_600
 
 
 @pytest.mark.asyncio

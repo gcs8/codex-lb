@@ -22,6 +22,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients import proxy as core_proxy
 from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import OpenAIErrorEnvelope
 from app.core.upstream_proxy import (
     ResolvedProxyEndpoint,
     ResolvedUpstreamRoute,
@@ -755,6 +756,455 @@ async def test_codex_control_json_endpoints_forward_upstream(
     ]
     assert isinstance(calls[0]["timeout_seconds"], float)
     assert calls[0]["timeout_seconds"] > 0
+
+
+_NATIVE_HISTORY_NOTES_ROUTES = (
+    "alpha/history/v2/list_windows",
+    "alpha/history/v2/list_items",
+    "alpha/history/v2/read_item",
+    "alpha/history/v2/search_contents",
+    "alpha/notes/v2/thread_hint",
+    "alpha/notes/v2/list_files_by_prefix",
+    "alpha/notes/v2/read_file",
+    "alpha/notes/v2/search_contents",
+    "alpha/notes/v2/append_to_file",
+    "alpha/notes/v2/write_file",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_path", _NATIVE_HISTORY_NOTES_ROUTES)
+async def test_native_history_notes_routes_preserve_body_and_native_headers(
+    async_client,
+    monkeypatch,
+    upstream_path: str,
+) -> None:
+    await _import_account(async_client, "acc_history_notes", "history-notes@example.com")
+    calls: list[dict[str, object]] = []
+
+    async def fake_codex_control_request(
+        path: str,
+        *,
+        payload: bytes | None,
+        headers,
+        account_id: str,
+        **_kwargs,
+    ) -> core_proxy.CodexControlResponse:
+        calls.append(
+            {
+                "path": path,
+                "payload": payload,
+                "encrypted_arguments": headers.get("x-openai-encrypted-tool-arguments"),
+                "truncation_policy": headers.get("x-openai-tool-output-truncation-policy"),
+                "session_id": headers.get("session_id"),
+                "account_id": account_id,
+            }
+        )
+        return core_proxy.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    body = json.dumps(
+        {
+            "context": {"session_id": "native-history-notes-session", "current_agent_name": "/root"},
+            "query": {"ciphertext": "opaque-encrypted-arguments"},
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    response = await async_client.post(
+        f"/backend-api/codex/{upstream_path}",
+        content=body,
+        headers={
+            "content-type": "application/json",
+            "x-openai-encrypted-tool-arguments": "true",
+            "x-openai-tool-output-truncation-policy": '{"type":"bytes","limit":4000}',
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "path": upstream_path,
+            "payload": body,
+            "encrypted_arguments": "true",
+            "truncation_policy": '{"type":"bytes","limit":4000}',
+            "session_id": None,
+            "account_id": "acc_history_notes",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_history_notes_body_session_reuses_codex_session_owner_and_never_fails_over(
+    async_client,
+    monkeypatch,
+) -> None:
+    from app.modules.proxy.affinity import _history_session_selection_key
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    owner_id = await _import_account(async_client, "acc_history_notes_owner", "history-notes-owner@example.com")
+    await _import_account(async_client, "acc_history_notes_other", "history-notes-other@example.com")
+    session_id = "history-notes-owner-session"
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            _history_session_selection_key(session_id),
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    upstream_accounts: list[str] = []
+
+    async def fail_on_owner_then_record(
+        _path: str,
+        *,
+        account_id: str,
+        **_kwargs,
+    ) -> core_proxy.CodexControlResponse:
+        upstream_accounts.append(account_id)
+        raise ProxyResponseError(502, {"error": {"code": "upstream_unavailable", "message": "owner failed"}})
+
+    async def unexpected_failover(*_args, **_kwargs):
+        pytest.fail("native history and notes must not select another account after upstream failure")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fail_on_owner_then_record)
+    monkeypatch.setattr(proxy_module.ProxyService, "_retry_previsible_unary_call_failover", unexpected_failover)
+
+    response = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/write_file",
+        json={"context": {"session_id": session_id, "current_agent_name": "/root"}, "path": "memory.md"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert upstream_accounts == ["acc_history_notes_owner"]
+
+
+@pytest.mark.asyncio
+async def test_native_history_notes_seed_from_process_session_owner_and_fail_closed_when_it_is_unavailable(
+    async_client,
+    monkeypatch,
+) -> None:
+    from app.modules.proxy.affinity import _codex_session_selection_key, _history_session_selection_key
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    account_a_id = await _import_account(async_client, "acc_history_session_a", "history-session-a@example.com")
+    account_b_id = await _import_account(async_client, "acc_history_session_b", "history-session-b@example.com")
+    account_ids_by_upstream = {"acc_history_session_a": account_a_id, "acc_history_session_b": account_b_id}
+    session_id = "c4f1-native-process-session"
+    notes_accounts: list[str] = []
+    response_calls: list[tuple[str, str | None]] = []
+
+    async def fake_codex_control_request(
+        _path: str,
+        *,
+        account_id: str,
+        **_kwargs,
+    ) -> core_proxy.CodexControlResponse:
+        notes_accounts.append(account_id)
+        return core_proxy.CodexControlResponse(status_code=200, body=b'{"text":""}', headers={})
+
+    async def fake_stream(payload, headers, access_token, account_id, **_kwargs):
+        response_calls.append((account_id, headers.get("thread-id")))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_history_session"}}\n\n'
+
+    async def unexpected_failover(*_args, **_kwargs):
+        pytest.fail("native history and notes must not select another account after upstream failure")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_retry_previsible_unary_call_failover", unexpected_failover)
+
+    async def bounded_post(*args, **kwargs):
+        return await asyncio.wait_for(async_client.post(*args, **kwargs), timeout=10)
+
+    async def history_owner() -> str | None:
+        async with SessionLocal() as session:
+            return await StickySessionsRepository(session).get_account_id(
+                _history_session_selection_key(session_id),
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+
+    response_payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    header_marker = '{"turn_id":"t-1","history_ingest_requested":true}'
+
+    # An ordinary Responses turn establishes the soft process-session owner.
+    root_response = await bounded_post(
+        "/backend-api/codex/responses",
+        json=response_payload,
+        headers={"session_id": session_id, "thread-id": "history-root-thread"},
+    )
+    assert root_response.status_code == 200
+    assert len(response_calls) == 1
+    owner_upstream_id = response_calls[0][0]
+    owner_id = account_ids_by_upstream[owner_upstream_id]
+    other_upstream_id = next(upstream for upstream in account_ids_by_upstream if upstream != owner_upstream_id)
+    async with SessionLocal() as session:
+        soft_owner = await StickySessionsRepository(session).get_account_id(
+            _codex_session_selection_key(session_id),
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    assert soft_owner == owner_id
+    assert await history_owner() is None
+
+    # The first native notes call for that session lands on the same account
+    # and persists its own hard history row.
+    notes_response = await bounded_post(
+        "/backend-api/codex/alpha/notes/v2/thread_hint",
+        json={"context": {"session_id": session_id, "current_agent_name": "/root"}},
+    )
+    assert notes_response.status_code == 200
+    assert notes_accounts == [owner_upstream_id]
+    assert await history_owner() == owner_id
+
+    # A history-marked Responses turn keeps ordinary soft affinity: it is
+    # routed exactly like an unmarked turn and does not touch the history row.
+    marked_response = await bounded_post(
+        "/backend-api/codex/responses",
+        json=response_payload,
+        headers={
+            "session_id": session_id,
+            "thread-id": "history-marked-thread",
+            "x-codex-turn-metadata": header_marker,
+        },
+    )
+    assert marked_response.status_code == 200
+    assert response_calls[-1] == (owner_upstream_id, "history-marked-thread")
+    assert await history_owner() == owner_id
+
+    pause_response = await bounded_post(f"/api/accounts/{owner_id}/pause")
+    assert pause_response.status_code == 200
+
+    # Soft Responses affinity still rotates off the paused owner, even with
+    # the history-ingest marker: the marker changes no ownership class.
+    rotated_response = await bounded_post(
+        "/backend-api/codex/responses",
+        json=response_payload,
+        headers={
+            "session_id": session_id,
+            "thread-id": "history-rotated-thread",
+            "x-codex-turn-metadata": header_marker,
+        },
+    )
+    assert rotated_response.status_code == 200, rotated_response.text
+    assert '"type":"response.completed"' in rotated_response.text, rotated_response.text
+    assert response_calls[-1] == (other_upstream_id, "history-rotated-thread")
+
+    # Native notes are account-local: with their owner unavailable they fail
+    # without selecting the other account or replacing the stored owner. The
+    # budget is shrunk only here, so the refusal is bounded without putting the
+    # rotation above under a wall-clock limit that a loaded machine can miss.
+    from app.core.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "http_responses_stream_request_budget_seconds", 0.1)
+    monkeypatch.setattr(get_settings(), "proxy_request_budget_seconds", 0.1)
+    paused_notes = await bounded_post(
+        "/backend-api/codex/alpha/notes/v2/write_file",
+        json={"context": {"session_id": session_id, "current_agent_name": "/root"}, "path": "memory.md"},
+    )
+    # A hard owner that stays unavailable is refused, never served by another
+    # account. Which refusal wins depends on whether selection reports the hard
+    # owner as unavailable (503) or the shrunken request budget runs out first
+    # (502); both are fail-closed, so pin exactly that pair rather than any
+    # non-200 status.
+    refusal = (paused_notes.status_code, paused_notes.json()["error"]["code"])
+    assert refusal in {
+        (503, "hard_affinity_saturated"),
+        (502, "upstream_request_timeout"),
+    }, paused_notes.text
+    assert notes_accounts == [owner_upstream_id]
+    assert await history_owner() == owner_id
+
+
+@pytest.mark.asyncio
+async def test_native_history_notes_without_body_session_forward_once_without_affinity(
+    async_client, monkeypatch
+) -> None:
+    await _import_account(async_client, "acc_history_notes_unpinned", "history-notes-unpinned@example.com")
+    calls: list[tuple[str, bytes | None, str | None]] = []
+
+    async def fake_codex_control_request(
+        path: str,
+        *,
+        payload: bytes | None,
+        headers,
+        **_kwargs,
+    ) -> core_proxy.CodexControlResponse:
+        calls.append((path, payload, headers.get("session_id")))
+        return core_proxy.CodexControlResponse(status_code=200, body=b'{"text":""}', headers={})
+
+    async def unexpected_failover(*_args, **_kwargs):
+        pytest.fail("native history and notes must not fail over even without a body session")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_module.ProxyService, "_retry_previsible_unary_call_failover", unexpected_failover)
+    body = json.dumps({"context": {"current_agent_name": "/root"}}, separators=(",", ":")).encode()
+
+    # The upstream protocol owns payload validation: a JSON object without a
+    # usable identity is forwarded unchanged rather than rejected here.
+    missing_session = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/thread_hint",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    malformed = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/thread_hint",
+        content=b"{",
+        headers={"content-type": "application/json"},
+    )
+    unknown_route = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/delete_file",
+        json={"context": {"session_id": "known-session", "current_agent_name": "/root"}},
+    )
+
+    assert missing_session.status_code == 200
+    assert calls == [("alpha/notes/v2/thread_hint", body, None)]
+    assert malformed.status_code == 400
+    assert unknown_route.status_code == 405
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_path", _NATIVE_HISTORY_NOTES_ROUTES)
+async def test_native_history_notes_trailing_slash_preserves_canonical_routing(
+    async_client, monkeypatch, upstream_path: str
+) -> None:
+    await _import_account(async_client, "acc_history_slash", "history-slash@example.com")
+    calls: list[tuple[str, bytes | None]] = []
+
+    async def fake_control(path: str, *, payload: bytes | None, **_kwargs):
+        calls.append((path, payload))
+        return core_proxy.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_control)
+    body = b'{"context":{"session_id":"slash-session"}}'
+    response = await async_client.post(
+        f"/backend-api/codex/{upstream_path}/",
+        content=body,
+        headers={"content-type": "application/json"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200, response.text
+    assert calls == [(upstream_path, body)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"{", b"[]", b"null", b"\xff"])
+async def test_native_history_notes_invalid_body_has_openai_error_envelope(
+    async_client, monkeypatch, body: bytes
+) -> None:
+    async def unexpected_control(*_args, **_kwargs):
+        pytest.fail("invalid native body must not reach upstream")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_control)
+    response = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/thread_hint",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert error["message"].startswith("native history and notes payload must be ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_path", _NATIVE_HISTORY_NOTES_ROUTES)
+@pytest.mark.parametrize("suffix", ["", "/"])
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-native-key"])
+async def test_native_history_notes_authenticates_before_body_parsing(
+    async_client, monkeypatch, upstream_path: str, suffix: str, authorization: str | None
+) -> None:
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+
+    async def unexpected_control(*_args, **_kwargs):
+        pytest.fail("unauthenticated native operation must not reach upstream")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_control)
+    headers = {"content-type": "application/json"}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    response = await async_client.post(f"/backend-api/codex/{upstream_path}{suffix}", content=b"{", headers=headers)
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_session", [None, "owner-session"])
+@pytest.mark.parametrize("status_code", [401, 429, 502])
+async def test_native_history_notes_upstream_error_is_not_retried(
+    async_client, monkeypatch, body_session: str | None, status_code: int
+) -> None:
+    await _import_account(async_client, "acc_history_error_a", "history-error-a@example.com")
+    await _import_account(async_client, "acc_history_error_b", "history-error-b@example.com")
+    calls: list[str] = []
+    error_payload: OpenAIErrorEnvelope = {
+        "error": {"code": "native_owner_error", "message": "owner rejected", "type": "server_error"}
+    }
+
+    async def fail_control(_path, *, account_id, **_kwargs):
+        calls.append(account_id)
+        raise ProxyResponseError(status_code, error_payload)
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fail_control)
+    response = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/append_to_file",
+        json={"context": {"session_id": body_session}},
+    )
+    assert response.status_code == status_code
+    assert response.json() == error_payload
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_history_notes_respects_api_key_account_assignment(async_client, monkeypatch) -> None:
+    from app.modules.proxy.affinity import _history_session_selection_key
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    owner_id = await _import_account(async_client, "acc_history_scope_owner", "history-scope-owner@example.com")
+    other_id = await _import_account(async_client, "acc_history_scope_other", "history-scope-other@example.com")
+    key_response = await async_client.post(
+        "/api/api-keys/", json={"name": "history-scope", "assignedAccountIds": [owner_id]}
+    )
+    assert key_response.status_code == 200
+    key = key_response.json()
+    auth_enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert auth_enabled.status_code == 200
+    calls: list[str] = []
+
+    async def fake_control(_path, *, account_id, **_kwargs):
+        calls.append(account_id)
+        return core_proxy.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_control)
+    headers = {"authorization": f"Bearer {key['key']}"}
+    first = await async_client.post(
+        "/backend-api/codex/alpha/history/v2/list_items",
+        json={"context": {"session_id": "scoped-history-session"}},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    assert calls == ["acc_history_scope_owner"]
+    updated = await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [other_id]})
+    assert updated.status_code == 200
+    from app.core.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "proxy_request_budget_seconds", 0.1)
+    denied = await async_client.post(
+        "/backend-api/codex/alpha/history/v2/list_items",
+        json={"context": {"session_id": "scoped-history-session"}},
+        headers=headers,
+    )
+    assert (denied.status_code, denied.json()["error"]["code"]) in {
+        (503, "hard_affinity_saturated"),
+        (502, "upstream_request_timeout"),
+    }, denied.text
+    assert calls == ["acc_history_scope_owner"]
+    async with SessionLocal() as session:
+        stored_owner = await StickySessionsRepository(session).get_account_id(
+            _history_session_selection_key("scoped-history-session"), kind=StickySessionKind.CODEX_SESSION
+        )
+    assert stored_owner == owner_id
 
 
 @pytest.mark.asyncio

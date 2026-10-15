@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -5468,6 +5470,31 @@ invent a local schema for successful search requests or responses.
   `/backend-api/codex/alpha/search`
 - **THEN** the request does not enter the upstream search forwarding path
 
+### Requirement: V1 standalone search shares the canonical control handler
+
+The proxy SHALL expose `POST /v1/alpha/search` as an alias of `POST /backend-api/codex/alpha/search` through the same authenticated Codex control handler. Both paths and the existing doubled-prefix canonicalization MUST preserve the standalone search forwarding contract, including opaque body bytes, repeated query parameters, selected account credentials, API-key model/account scopes, session affinity, upstream-route policy and normalized final error status/envelope. This alias MUST NOT add a Responses tool-choice transformation, a local successful-search schema, non-POST search support or trailing-slash search aliases.
+
+#### Scenario: V1 and native search forward the same request
+
+- **GIVEN** a valid proxy API key scoped to an eligible account
+- **WHEN** the same standalone search body is posted through the native, doubled-prefix or V1 path
+- **THEN** the existing control handler forwards it to `POST /codex/alpha/search`
+- **AND** the selected credentials, body bytes and repeated query values retain the canonical contract
+- **AND** native HTTP emits exactly one case-insensitive media-type header preserving the inbound media type
+- **AND** successful response bytes and status are preserved without local schema rewriting
+
+#### Scenario: Search aliases retain authorization and error handling
+
+- **WHEN** a search request has invalid credentials or no eligible account within its API-key scope
+- **THEN** it does not dispatch to an unauthorized upstream account
+- **AND** all supported aliases retain the canonical OpenAI error envelope
+
+#### Scenario: Final upstream refusals preserve status and details
+
+- **WHEN** native HTTP delivers a final upstream search refusal through either base URL
+- **THEN** the proxy returns the existing normalized OpenAI error envelope and final upstream status
+- **AND** no unsupported method or unregistered trailing-slash path enters search forwarding
+
 ### Requirement: Pre-acceptance account-model rejections fail over safely
 
 When upstream rejects a Responses request with `invalid_request_error` and the exact message `The '<model>' model is not supported when using Codex with a ChatGPT account.` before accepting the response, the proxy MUST classify the failure internally as `account_model_unsupported`. The quoted model MUST match
@@ -5483,7 +5510,10 @@ including a `response.failed` payload that carries `response.id` even when
 `response.created` was not observed or an `error` payload with top-level
 `response_id`, a nonterminal `response.*`
 event, downstream sequence/output, another pending request on the shared
-socket, or an earlier replay. If no compatible replacement is available, or
+socket, or an earlier replay other than a completed pre-created WebSocket auth
+refresh on the rejecting account. That auth refresh MUST NOT consume the one account/model rejection
+move; a request MUST NOT make a second account/model rejection move even if it
+later refreshes another account. If no compatible replacement is available, or
 the request is account-bound, the proxy MUST preserve the original upstream
 400 error instead of replacing it with `no_accounts`, `stream_incomplete`, or
 another proxy-generated failure.
@@ -5527,8 +5557,21 @@ another proxy-generated failure.
 
 #### Scenario: accepted or visible request is never replayed
 
-- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay
+- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay other than a completed pre-created WebSocket auth refresh on the rejecting account
 - **THEN** the proxy does not transparently replay the request on another account
+
+#### Scenario: completed WebSocket auth refresh preserves the model move
+
+- **GIVEN** a movable pre-created WebSocket request has refreshed account A and replayed there after an auth failure
+- **WHEN** A rejects the model before accepting the response
+- **THEN** the proxy may move the request once to an eligible account B
+- **AND** a further account/model rejection cannot trigger another move
+
+#### Scenario: reauthentication without refresh does not replenish the model move
+
+- **GIVEN** account A fails authentication and the proxy moves a pre-created WebSocket request to B without completing a forced refresh
+- **WHEN** B rejects the requested model before acceptance
+- **THEN** the proxy does not move the request to a third account
 
 #### Scenario: account-bound request is never migrated
 
@@ -10776,6 +10819,32 @@ Metrics SHALL NOT label raw request, conversation, session, account or API-key i
 - **THEN** its routing diagnostics distinguish that reason
 - **AND** admission counters MUST NOT be represented as successful WS connections
 
+### Requirement: HTTP bridge counts explicit incomplete transport reasons
+
+For an otherwise eligible pre-response HTTP-bridge attempt, the proxy MUST account a `response.incomplete` terminal with `incomplete_details.reason` equal to `stream_incomplete` and no explicit response error as one retry-circuit failure. It MUST apply existing duplicate and eligibility guards. An explicit response error MUST retain precedence. Neutral, unknown and missing reasons MUST NOT become transport failures. Downstream terminal payloads, request-log classification and account-health treatment MUST remain unchanged.
+
+#### Scenario: Reason-only stream failure
+- **WHEN** an eligible HTTP-bridge attempt receives a reason-only `stream_incomplete` terminal through either raw or interpreted upstream input
+- **THEN** one retry-circuit failure is recorded
+- **AND** repeating its terminal does not add another failure
+- **AND** its downstream payload and account-health treatment remain unchanged
+
+#### Scenario: Neutral reasons and explicit errors
+- **WHEN** an incomplete terminal contains a neutral, unknown or missing reason, or an explicit response error
+- **THEN** the existing explicit-error classification takes precedence when present
+- **AND** the reason alone does not introduce a transport failure unless it is exactly `stream_incomplete`
+- **AND** the request-log classification remains unchanged
+
+#### Scenario: Existing attempt exclusions
+- **WHEN** a reason-only stream failure belongs to an attempt excluded by existing circuit eligibility or duplicate guards
+- **THEN** the terminal does not add a circuit failure
+
+#### Scenario: Repeated incomplete outcomes reach the retry cap
+- **WHEN** distinct eligible attempts on the same hard-affinity key terminate with reason-only `stream_incomplete` until the existing circuit threshold is reached
+- **THEN** the existing cooldown MUST suppress further pre-response retries
+- **AND** each attempt MUST settle and remove its pending state before returning
+- **AND** an idle upstream disconnect with no pending request MUST NOT add a failure or penalize the healthy account
+
 ### Requirement: Observed HTTP response IDs publish same-process ownership before delivery
 
 When an HTTP Responses attempt extracts a valid response ID from an actual upstream lifecycle event, it MUST publish that ID to the existing bounded process owner cache with the selected account and existing API-key/session scope before delivering the event that exposes the ID downstream. An immediate same-process follow-up referencing that ID MUST be able to resolve its known owner without waiting for the originating request-log write or originating stream completion. This readiness MUST apply from the first observed lifecycle event carrying the ID, including `response.created`, `response.queued`, and `response.in_progress`, whether delivered as SSE or adapted from a canonical background JSON acknowledgement; it MUST NOT promise that an unfinished response is already usable by the upstream provider.
@@ -10896,3 +10965,127 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Durable same-owner context proof accepts agent-message follow-ups
+
+For a prefix-verified durable HTTP bridge full resend, the service SHALL accept
+well-formed `agent_message` items as fresh same-owner input after retained
+completed assistant output, or after a complete direct tool-call/output suffix
+that exactly settles the durable prior-response manifest. Agent messages MUST
+NOT substitute for missing prior output, missing tool calls, or missing tool
+outputs. Unknown or malformed agent-message shapes MUST NOT authorize replay.
+
+The fresh bridge and bounded explicit stale-anchor recovery paths SHALL retain
+the original input items and their order, including reasoning and encrypted
+agent-message content, while omitting the stale `previous_response_id`.
+The request MUST remain pinned to the proven durable account and MUST fail
+closed if that account is unavailable. This proof MUST NOT make an agent-message
+payload eligible for account-neutral replay or relax existing operation fences,
+replay limits, or the ban on replay after visible response output.
+
+#### Scenario: Subagent message follows a settled tool loop on a replacement socket
+- **GIVEN** the full input matches the durable stored prefix and settles every call in its manifest
+- **AND** a new agent message follows those tool outputs
+- **WHEN** the client resumes on a fresh HTTP bridge
+- **THEN** the original full input is sent to the durable owner without a previous-response anchor
+- **AND** encrypted content and item identifiers are preserved
+
+#### Scenario: Same owner explicitly rejects the anchor
+- **GIVEN** a prefix-verified full resend containing a valid agent follow-up
+- **WHEN** upstream rejects its anchor before any response output
+- **THEN** the existing fenced one-shot replacement sends the original full input without the rejected anchor to the same owner
+
+#### Scenario: Agent message cannot cover incomplete history
+- **GIVEN** a resend omits a manifest call or its output, lacks a known manifest and retained assistant output, or contains a malformed agent message
+- **WHEN** the bridge verifies same-owner context
+- **THEN** the agent message does not authorize unanchored replay
+
+#### Scenario: Unavailable owner cannot move encrypted agent context
+- **GIVEN** a full resend passes the same-owner proof and contains an agent message
+- **WHEN** its durable owner is unavailable
+- **THEN** no alternate account receives the request
+
+### Requirement: Owner-forward HTTP streams preserve SSE event boundaries
+
+The owner-forward HTTP receiver MUST dispatch each complete SSE event delimited
+by two consecutive CR, LF, or CRLF line endings, including mixed endings,
+without waiting for connection close. Chunk boundaries MUST NOT change payload
+text or cause a CRLF continuation byte to become part of the next event. Invalid
+UTF-8 bytes in complete events or the final unterminated block MUST decode with
+replacement characters instead of aborting the relay. Valid UTF-8 characters
+split across chunks MUST remain intact. Existing idle and request-budget timeout
+classification MUST remain unchanged.
+
+#### Scenario: Non-LF framing streams incrementally
+
+- **WHEN** an owner forwards multiple events separated by CRLF, CR, or mixed CR/LF blank lines
+- **THEN** the origin dispatches each event before EOF
+- **AND** the final `response.completed` remains separately parseable
+
+#### Scenario: Chunk boundaries preserve text and event identity
+
+- **WHEN** network chunks split a multi-byte UTF-8 character or a CRLF separator
+- **THEN** decoded payload text remains intact
+- **AND** the next event has no residual separator byte prefixed to its fields
+
+#### Scenario: Malformed UTF-8 is replaced
+
+- **WHEN** an event or the final unterminated block contains invalid UTF-8
+- **THEN** the receiver replaces the invalid bytes with U+FFFD
+- **AND** continues delivering subsequent events when present
+
+### Requirement: Post-terminal health failures preserve stream completion
+After publishing a terminal Responses event, the proxy MUST log ordinary failures from subsequent account-error health writes without emitting another terminal event or aborting stream completion. This MUST apply to first-event, later-event, and raised upstream errors, with and without an API-key reservation. Required reservation settlement MUST precede the health write. Cancellation MUST retain its existing propagation and cleanup behavior.
+
+#### Scenario: Account health persistence fails after a terminal response
+- **WHEN** an upstream failure produces a terminal response and the subsequent account-error health write raises an ordinary exception
+- **THEN** the client receives exactly one terminal event with the original response error and the stream completes normally
+- **AND** the health-write failure is logged with exception information
+
+#### Scenario: Keyed health persistence fails after ordered settlement
+- **WHEN** a keyed continuation fails and its account-error health write raises after reservation settlement
+- **THEN** settlement completes before the health write is attempted
+- **AND** the client receives only the intended owner-unavailable terminal response
+
+### Requirement: Downstream receive ownership survives upstream retirement
+
+The native and `/v1/responses` public WebSocket routes MUST retain one connection-owned downstream receive task across polling deadlines, idle rechecks and clean upstream generation retirement. They MUST transfer each received frame exactly once into the existing validation and request ownership path before starting another receive. Only final downstream connection cleanup MAY cancel and join the receive owner, within the existing bounded cleanup deadline.
+
+Retaining ingress MUST NOT change account ownership, explicit caller, file, MCP or opaque continuity pins, inject a fabricated upstream anchor, broaden replay eligibility, penalize a healthy idle account, or allow a retired owner to settle the next turn's API-key reservation.
+
+#### Scenario: Queued next turn overlaps clean upstream close
+
+- **GIVEN** the first turn has completed on an upstream connection
+- **AND** the next valid create has left the downstream transport but has not entered request preparation
+- **WHEN** a poll deadline and upstream clean close occur in either coordinated order
+- **THEN** the same receive owner retains the queued frame
+- **AND** the next turn is dispatched once through its correct fresh owner and connection or receives the existing documented terminal error
+- **AND** no frame is lost and no old owner settles the new turn
+
+#### Scenario: Cancellation while a receive is blocked
+
+- **WHEN** the downstream scope is cancelled with a blocked receive owner
+- **THEN** final connection cleanup cancels and joins that owner within its existing bound
+- **AND** request, reservation and lease cleanup retains its existing single-owner behavior
+
+#### Scenario: Retiring generation has observed an eligible next turn
+
+- **GIVEN** a poll deadline has elapsed without cancelling the receive that consumed the next create
+- **AND** the retiring generation subsequently observes that exact create before a clean close and before visible output
+- **WHEN** existing replay policy admits its replacement attempt
+- **THEN** the replacement receives exactly one eligible replay with the same request state and reservation
+- **AND** the original request start and one-shot replay budget are preserved
+- **AND** terminal settlement and request-log attribution belong to the successful dispatch owner exactly once
+
+#### Scenario: Connection teardown owns the final receive
+
+- **WHEN** a client disconnects, the downstream scope is cancelled, the server drains or the connection reaches its ordinary idle deadline
+- **THEN** connection teardown joins the remaining receive owner, including a frame suspended after ASGI dequeue
+- **AND** a raw frame not admitted before teardown creates no request reservation or upstream dispatch
+- **AND** ordinary idle closure does not penalize an otherwise healthy account
+
+#### Scenario: Queued pinned continuation retains its owner
+
+- **WHEN** an explicit caller anchor, file-owned input, anchored MCP approval or anchored opaque item crosses a clean-close ingress handoff
+- **THEN** normal preparation and account selection preserve its original hard owner and exact input
+- **AND** retaining that frame grants neither cross-account fallback nor new replay eligibility

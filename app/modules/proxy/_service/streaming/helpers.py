@@ -5,7 +5,8 @@ import json
 import sys
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, AsyncIterator, Literal, Mapping, cast
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal, Mapping, TypedDict, cast
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
@@ -36,6 +37,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock
 from app.core.errors import (
@@ -72,7 +74,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
     UPSTREAM_SOFT_OVERLOAD_CODES,
@@ -429,6 +431,48 @@ from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.usage.updater import UsageUpdater
 
 
+class _HTTPPhaseLogFields(TypedDict):
+    latency_first_token_ms: int | None
+    latency_first_upstream_event_ms: int | None
+    latency_response_created_ms: int | None
+
+
+@dataclass(slots=True)
+class _HTTPPhaseLatencies:
+    first_token_ms: int | None = None
+    first_upstream_event_ms: int | None = None
+    response_created_ms: int | None = None
+
+    def parse_event(
+        self, line: str, started_at: float, observed_at: Callable[[], float]
+    ) -> tuple[dict[str, JsonValue] | None, str | None]:
+        payload = parse_sse_data_json(line)
+        event_type = classify_event_type(payload)
+        if (
+            payload is not None
+            and event_type != "codex.keepalive"
+            and not (isinstance(line, ParsedSseBlock) and line.is_local)
+            and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
+            and (
+                self.first_upstream_event_ms is None
+                or (self.response_created_ms is None and event_type == "response.created")
+            )
+        ):
+            elapsed_ms = max(0, int((observed_at() - started_at) * 1000))
+            if self.first_upstream_event_ms is None:
+                self.first_upstream_event_ms = elapsed_ms
+            if self.response_created_ms is None and event_type == "response.created":
+                self.response_created_ms = elapsed_ms
+        return payload, event_type
+
+    def log_fields(self) -> _HTTPPhaseLogFields:
+        return {
+            "latency_first_token_ms": self.first_token_ms,
+            "latency_first_upstream_event_ms": self.first_upstream_event_ms,
+            "latency_response_created_ms": self.response_created_ms,
+        }
+
+
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
@@ -531,6 +575,38 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
+def _stream_responses(
+    proxy: _StreamingServiceProtocol,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    *,
+    codex_session_affinity: bool = False,
+    propagate_http_errors: bool = False,
+    openai_cache_affinity: bool = False,
+    api_key: ApiKeyData | None = None,
+    api_key_reservation: ApiKeyUsageReservationData | None = None,
+    suppress_text_done_events: bool = False,
+    request_transport: str = _REQUEST_TRANSPORT_HTTP,
+    client_ip: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
+) -> AsyncIterator[str]:
+    _maybe_log_proxy_request_payload("stream", payload, headers)
+    filtered = _facade().filter_inbound_headers(headers)
+    return proxy._stream_with_retry(
+        payload,
+        filtered,
+        codex_session_affinity=codex_session_affinity,
+        propagate_http_errors=propagate_http_errors,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+        api_key_reservation=api_key_reservation,
+        suppress_text_done_events=suppress_text_done_events,
+        request_transport=request_transport,
+        client_ip=client_ip,
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
+
+
 def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
     """Whether this stream failure owes the account a health write.
 
@@ -610,7 +686,9 @@ def _classify_upstream_close(
     close_code: int | None,
     *,
     response_events_seen: int,
-) -> Literal["clean", "transient"]:
+) -> Literal["clean", "transient", "payload_too_large"]:
+    if is_upstream_message_too_big_close_code(close_code):
+        return "payload_too_large"
     if close_code == 1000 and response_events_seen == 0:
         # A clean websocket close before response.created does not prove that
         # the request was invalid.  The upstream can close a socket during a
@@ -1095,11 +1173,16 @@ def _is_account_neutral_request_rejection(
         return False
     if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
         return True
+    if code == "unsupported_value" and message == (
+        "X-OpenAI-Internal-Codex-Responses-Lite requires `parallel_tool_calls` to be false."
+    ):
+        return True
     return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
 
 def _is_model_scoped_rejection(
     *,
+    code: str,
     http_status: int | None,
     message: str | None,
 ) -> bool:
@@ -1118,14 +1201,13 @@ def _is_model_scoped_rejection(
     returned, so the caller keeps trying other accounts, whose entitlements may
     differ.
 
-    The normalized code is not part of the match. Upstream delivers this
-    rejection with neither ``code`` nor ``type`` on the streaming path, which
-    normalizes to ``upstream_error``; on other paths it arrives as
-    ``invalid_request_error``. Only the exact message shape decides membership.
+    ``model_not_found`` is authoritative. Code-less legacy rejections still
+    need the exact message shape because their streaming frames normalize to
+    ``upstream_error``; other non-400 errors remain account-scoped.
     """
-    if http_status is not None and http_status != 400:
+    if code != "model_not_found" and http_status is not None and http_status != 400:
         return False
-    return is_model_scoped_upstream_rejection(message)
+    return is_model_scoped_upstream_rejection(message, error_code=code)
 
 
 def _request_usage_refresh(proxy: Any, account_id: str) -> None:
@@ -1200,6 +1282,7 @@ async def _handle_stream_error(
         )
         return classified
     if _is_model_scoped_rejection(
+        code=code,
         http_status=http_status,
         message=error.get("message"),
     ):

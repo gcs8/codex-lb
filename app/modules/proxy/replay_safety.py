@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
@@ -21,6 +23,14 @@ _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
 _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset({"reasoning", "web_search_call"})
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
+_HOST_AUTOMATION_HEARTBEAT_FIELDS = frozenset(
+    {"internal_chat_message_metadata_passthrough", "name", "namespace", "output", "type"}
+)
+_HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS = frozenset({"create_time", "turn_id"})
+_HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE = re.compile(
+    r"<heartbeat><automation_id>[^<>\s]+</automation_id>"
+    r"(?:<current_time_iso>[^<>\s]+</current_time_iso>)?</heartbeat>"
+)
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),
@@ -249,6 +259,10 @@ def _project_account_neutral_replay_item(
         return item
     if item_type is not None and not isinstance(item_type, str):
         return item
+    if item_type == "agent_message":
+        # Only same-owner context proofs accept these opaque input items.
+        # Preserve their complete shape for validation; they are not portable.
+        return item
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):
@@ -268,6 +282,10 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
     for item in input_items:
         if not isinstance(item, dict):
             return False
+        if _is_host_automation_heartbeat_input(item):
+            if any(unsettled_call_ids_by_type.values()):
+                return False
+            continue
         if "type" in item and not _is_nonblank_string(item.get("type")):
             return False
         if item.get("id") not in (None, ""):
@@ -321,6 +339,7 @@ def responses_input_suffix_retains_prior_output(
     *,
     stored_count: int,
     canonical_lite_developer_index: int | None = None,
+    allow_same_owner_agent_messages: bool = False,
 ) -> bool:
     """Prove that a stored input prefix is followed by prior output and new input."""
 
@@ -346,6 +365,13 @@ def responses_input_suffix_retains_prior_output(
         if "type" in item and not _is_nonblank_string(item_type_value):
             return False
         item_type = item_type_value if isinstance(item_type_value, str) else None
+        if _is_host_automation_heartbeat_input(item):
+            if not retained_output_seen or pending_suffix_calls:
+                return False
+            fresh_followup_seen = True
+            fresh_followup_count += 1
+            fresh_followup_is_user_message = False
+            continue
         if item_type in _TOOL_CALL_TYPES:
             if item.get("status") not in (None, "completed"):
                 return False
@@ -383,7 +409,7 @@ def responses_input_suffix_retains_prior_output(
             fresh_followup_count = 0
             fresh_followup_is_user_message = False
             continue
-        if _is_fresh_followup_input(item):
+        if _is_fresh_followup_input(item) or (allow_same_owner_agent_messages and _is_same_owner_agent_message(item)):
             if not retained_output_seen or pending_suffix_calls:
                 return False
             fresh_followup_seen = True
@@ -405,12 +431,39 @@ def responses_input_suffix_retains_prior_output(
     return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
 
 
+def project_responses_input_retaining_prior_output(
+    input_items: list[JsonValue],
+) -> AccountNeutralReplayProjection | None:
+    """Project a full resend whose final assistant turn precedes fresh input."""
+
+    last_assistant_index: int | None = None
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
+            last_assistant_index = index
+            break
+    if last_assistant_index is None or last_assistant_index == 0:
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=last_assistant_index,
+    )
+    if projection is None or not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    ):
+        return None
+    return projection
+
+
 def responses_input_suffix_matches_pending_tool_calls(
     input_items: list[JsonValue],
     *,
     stored_count: int,
     pending_tool_calls: Mapping[str, str],
     canonical_lite_developer_index: int | None = None,
+    allow_same_owner_agent_messages: bool = False,
 ) -> bool:
     """Prove the suffix exactly settles the durable prior-response call manifest."""
 
@@ -424,6 +477,13 @@ def responses_input_suffix_matches_pending_tool_calls(
     if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
         return False
     suffix = input_items[stored_count:]
+    if allow_same_owner_agent_messages:
+        # New subagent input may follow the settled response, but cannot stand
+        # in for a missing call/output or interrupt a parallel call batch. Only
+        # the proof view omits these items; dispatch retains the original body
+        # on its proven owner. Account-neutral checks still reject them.
+        while suffix and _is_same_owner_agent_message(suffix[-1]):
+            suffix.pop()
     if (
         len(suffix) == 3
         and isinstance(suffix[1], dict)
@@ -438,6 +498,8 @@ def responses_input_suffix_matches_pending_tool_calls(
         for item in suffix
     ):
         return False
+    if any(_is_host_automation_heartbeat_input(item) for item in suffix if isinstance(item, dict)):
+        return False
     if not responses_input_items_are_self_contained_fresh_replay(suffix):
         return False
     suffix_calls: dict[str, str] = {}
@@ -451,6 +513,36 @@ def responses_input_suffix_matches_pending_tool_calls(
             suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
     expected = dict(pending_tool_calls)
     return suffix_calls == expected and suffix_outputs == expected
+
+
+def _is_same_owner_agent_message(item: JsonValue) -> bool:
+    """Recognize opaque Codex subagent input without claiming account portability."""
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return False
+    if item.keys() - {"type", "id", "author", "recipient", "content", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}:
+        return False
+    if not _is_nonblank_string(item.get("author")) or not _is_nonblank_string(item.get("recipient")):
+        return False
+    if "id" in item and not _is_nonblank_string(item["id"]):
+        return False
+    metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    if metadata is not None and not isinstance(metadata, dict):
+        return False
+    content = item.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            return False
+        if part.get("type") == "input_text":
+            if part.keys() != {"type", "text"} or not _is_nonblank_string(part.get("text")):
+                return False
+        elif part.get("type") == "encrypted_content":
+            if part.keys() != {"type", "encrypted_content"} or not _is_nonblank_string(part.get("encrypted_content")):
+                return False
+        else:
+            return False
+    return True
 
 
 def _direct_tool_call_prefix_state(
@@ -473,6 +565,10 @@ def _direct_tool_call_prefix_state(
         if item_type_value is not None and not isinstance(item_type_value, str):
             return None
         item_type = item_type_value if isinstance(item_type_value, str) else None
+        if _is_host_automation_heartbeat_input(item):
+            if pending_calls:
+                return None
+            continue
         if item.get("role") == "developer" and item_type != "additional_tools":
             developer_message_is_transparent = _historical_pending_developer_message_is_transparent(
                 item,
@@ -617,6 +713,35 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
     ):
         return False
     return _message_has_valid_account_neutral_content(item)
+
+
+def _is_host_automation_heartbeat_input(item: Mapping[str, JsonValue]) -> bool:
+    """Recognize the account-neutral trigger injected by Codex scheduled tasks."""
+
+    if set(item) != _HOST_AUTOMATION_HEARTBEAT_FIELDS:
+        return False
+    if (
+        item.get("type") != "function_call_output"
+        or item.get("name") != "automation_update"
+        or item.get("namespace") != "codex_app"
+    ):
+        return False
+    output = item.get("output")
+    if not isinstance(output, str):
+        return False
+    if _HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE.fullmatch(output) is None:
+        return False
+    metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    if not isinstance(metadata, dict) or set(metadata) != _HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS:
+        return False
+    create_time = metadata.get("create_time")
+    if not isinstance(create_time, (int, float)) or isinstance(create_time, bool):
+        return False
+    try:
+        finite_create_time = math.isfinite(create_time)
+    except OverflowError:
+        return False
+    return _is_nonblank_string(metadata.get("turn_id")) and finite_create_time and create_time > 0
 
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:

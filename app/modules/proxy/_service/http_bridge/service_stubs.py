@@ -263,6 +263,10 @@ def _websocket_event_error_type(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_event_error_type")(*args, **kwargs)
 
 
+def _websocket_event_incomplete_reason(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_websocket_event_incomplete_reason")(*args, **kwargs)
+
+
 def _websocket_event_error_param(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_event_error_param")(*args, **kwargs)
 
@@ -374,6 +378,10 @@ def _is_local_account_cap_code(*args: Any, **kwargs: Any) -> Any:
 
 def _upstream_websocket_disconnect_message(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_upstream_websocket_disconnect_message")(*args, **kwargs)
+
+
+def _upstream_websocket_payload_too_large_message(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_upstream_websocket_payload_too_large_message")(*args, **kwargs)
 
 
 def _await_cancelled_task(*args: Any, **kwargs: Any) -> Any:

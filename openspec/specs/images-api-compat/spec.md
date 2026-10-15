@@ -23,7 +23,7 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 
 #### Scenario: Per-model parameter rules are enforced for gpt-image-2
 
-- **WHEN** a client sends `gpt-image-2` with `background=transparent` or `input_fidelity=low|high`, or with `size` violating the gpt-image-2 size constraints (max edge ≤ 3840 px, both edges multiples of 16, ratio ≤ 3:1, total pixels in [655_360, 8_294_400])
+- **WHEN** a client sends `gpt-image-2` with `input_fidelity=low|high`, or with `size` violating the gpt-image-2 size constraints (max edge ≤ 3840 px, both edges multiples of 16, ratio ≤ 3:1, total pixels in [655_360, 8_294_400])
 - **THEN** the service returns 400 with OpenAI `invalid_request_error` describing the rejected parameter
 
 #### Scenario: Per-model parameter rules are enforced for legacy gpt-image models
@@ -60,6 +60,8 @@ The system SHALL expose `POST /v1/images/edits` and accept the OpenAI Images Edi
 ### Requirement: Image generation is implemented as a Responses tool adapter
 
 The system SHALL implement `/v1/images/generations` and `/v1/images/edits` by issuing an internal `/v1/responses` request whose `tools` array includes `{"type": "image_generation", ...}` and whose `input` is constructed to deterministically force a single `image_generation` tool call. The system MUST route that internal request through the existing proxy account-selection, sticky session, retry, and authentication pipeline. The system MUST NOT introduce a new `chatgpt-token → openai-api-key` token-exchange path solely to support these endpoints.
+
+The internal request MUST use dedicated ordered Images host selection independent from default account probes. The public `gpt-image-*` model MUST remain in the image tool configuration and MUST NOT be replaced by the internal host model.
 
 #### Scenario: Internal Responses call uses existing routing
 
@@ -274,16 +276,45 @@ The Codex-base and `/v1` image generation and edit routes MUST require a valid p
 - **THEN** the route retains its existing authentication, validation, account-routing, observability, and response behavior
 
 ### Requirement: Internal host selection
-Images generation and edit routes MUST select the first candidate with nonempty registry plan visibility and no suppression, ordered as `gpt-5.6-luna`, `gpt-5.5`. If none qualifies, they MUST use `gpt-5.6-luna`. Public image model IDs MUST remain unchanged.
+Images generation and edit routes MUST select the first candidate with nonempty registry plan visibility and no suppression, ordered as `gpt-5.6-sol`, `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.5`. If none qualifies, they MUST use `gpt-5.6-sol`. Public image model IDs MUST remain unchanged. Registry visibility MUST NOT bypass account entitlement, trusted-access checks, account ownership, or existing downstream errors, and MUST NOT introduce host retries. Default account probes MUST retain their independent Luna-then-5.5 selection.
 
 #### Scenario: Cold registry prefers the current host
 - **WHEN** the registry uses the bootstrap catalog
-- **THEN** the internal model is `gpt-5.6-luna`
+- **THEN** the internal model is `gpt-5.6-sol`
 
 #### Scenario: Preferred model unavailable in registry
 - **WHEN** only `gpt-5.5` has registry plan visibility without suppression
 - **THEN** the internal model is `gpt-5.5`
 
 #### Scenario: No candidate qualifies
-- **WHEN** neither candidate has plan visibility without suppression
-- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies
+- **WHEN** no candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-sol` and existing downstream error handling applies
+
+#### Scenario: Suppressed preferred host is not selected
+- **WHEN** `gpt-5.6-sol` is suppressed and `gpt-6-astra` has plan visibility without suppression
+- **THEN** the internal model is `gpt-6-astra`
+
+#### Scenario: Images host selection does not change account probes
+- **WHEN** Images host preference changes
+- **THEN** the default account-probe host order remains unchanged
+
+### Requirement: Transparent image output preserves settings and bytes
+
+The system SHALL accept GPT Image 2 transparent PNG/WebP generation and editing on public and Codex-native routes. It MUST forward requested image settings and preserve returned bytes without model substitution or synthetic transparency. Transparent JPEG MUST return HTTP 400 `invalid_request_error` with `param=output_format` before upstream calls. Existing per-model validations and upstream errors MUST remain enforced.
+
+#### Scenario: Transparent PNG or WebP reaches upstream
+
+- **WHEN** a client requests GPT Image 2 transparent PNG or WebP generation or editing
+- **THEN** the requested model, background, output format, quality, and size are forwarded unchanged
+- **AND** upstream image bytes are returned unchanged in JSON or streaming responses
+
+#### Scenario: Transparent JPEG is rejected before upstream
+
+- **WHEN** an Images request specifies `background=transparent` and `output_format=jpeg`
+- **THEN** the service returns HTTP 400 with OpenAI `invalid_request_error` and `param=output_format`
+- **AND** no upstream request is opened
+
+#### Scenario: Upstream transparency failure remains visible
+
+- **WHEN** upstream rejects a valid transparent GPT Image 2 request
+- **THEN** the existing status and error envelope are returned without substituting a model or stripping transparency settings

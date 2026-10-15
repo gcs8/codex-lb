@@ -44,13 +44,15 @@ from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
     classify_event_type,
     parse_sse_event_payload,
+    parse_websocket_event_payload,
+    websocket_event_payload_has_finite_numbers,
 )
 from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.shared_future import wait_on_shared_future
-from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
+from app.core.utils.sse import format_sse_event, format_sse_event_from_text
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -128,12 +130,14 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_get_settings,
     _service_tier_from_event_payload,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_auth_request_can_switch_account,
     _websocket_downstream_response_id,
     _websocket_event_error_code,
     _websocket_event_error_message,
     _websocket_event_error_param,
     _websocket_event_error_type,
+    _websocket_event_incomplete_reason,
     _websocket_owner_pinned_quota_error_code,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
@@ -2343,6 +2347,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
+                payload_too_large_close = message.kind in ("close", "error") and (
+                    _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
+                    == "payload_too_large"
+                )
                 # Account-neutral transport failures do not prove that the
                 # upstream rejected response.create. The request may still be
                 # executing, so replay could duplicate work, billing, or tool
@@ -2352,7 +2360,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # Only a terminal transport message (close or error) may replay
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.
-                if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
+                if (
+                    not account_neutral
+                    and not payload_too_large_close
+                    and (message.kind in {"close", "error"} or not accepted_response_pending)
+                ):
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -2389,8 +2401,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
-                        error_code=message.error_code or "stream_incomplete",
-                        error_message=_upstream_websocket_disconnect_message(message),
+                        error_code=(
+                            "payload_too_large"
+                            if payload_too_large_close
+                            else message.error_code or "stream_incomplete"
+                        ),
+                        error_message=(
+                            _upstream_websocket_payload_too_large_message()
+                            if payload_too_large_close
+                            else _upstream_websocket_disconnect_message(message)
+                        ),
                         upstream_close_code=message.close_code,
                         response_events_seen=response_events_seen,
                         transport_classification=(
@@ -2400,7 +2420,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         retry_circuit_attempt_selection=reader_failure_retry_circuit_attempt_selection,
                         penalize_account=(
-                            not account_neutral
+                            not payload_too_large_close
+                            and not account_neutral
                             and not account_neutral_transport_drop
                             and not (message.kind == "close" and close_classification == "clean")
                         ),
@@ -2494,27 +2515,29 @@ class _HTTPBridgeUpstreamEventsMixin:
             scheduler = scheduler_for(self)
         if clock is None:
             clock = clock_for(self)
-        # One JSON document per websocket text frame: parse it directly instead
-        # of framing it as SSE and running the line parser over it. The
-        # data-only block is what unmatched events relay.
-        event_block = f"data: {text}\n\n"
-        if (
-            message is not None
-            and message.responses_interpreted
-            and message.payload is not None
-            and text.startswith("{")
-            and "\n" not in text
-            and "\r" not in text
-        ):
-            # Only this shape uses the direct JSON path in the legacy bridge.
-            # Preserve its SSE-field semantics for whitespace/multiline text.
-            payload = message.payload
+        # A websocket text frame is one JSON document, including pretty JSON.
+        # SSE data-line extraction would discard its unprefixed continuation lines.
+        if message is not None and message.responses_interpreted and message.payload is not None:
+            payload = message.payload if websocket_event_payload_has_finite_numbers(message.payload) else None
             event_type = message.event_type
             routing = message.routing
         else:
-            payload = parse_sse_data_json_text(text)
+            payload = parse_websocket_event_payload(text)
             event_type = classify_event_type(payload)
             routing = None
+        if payload is None:
+            # Rejected JSON is diagnostic data, never a raw downstream SSE event.
+            async with session.pending_lock:
+                archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                _archive_http_bridge_upstream_text(session, text, archive_request_state)
+            return
+        # Completed tool items may be mutated in place by deduplication below.
+        # Keep their initial framing on the same re-serialization path as relay.
+        event_block = (
+            format_sse_event(payload)
+            if event_type == "response.output_item.done"
+            else format_sse_event_from_text(payload, text)
+        )
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
@@ -3699,16 +3722,31 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
                 if staged:
-                    # A busy create gate forwards the upstream terminal as-is;
-                    # only a replay that was attempted and failed is rewritten.
-                    status_request_state.error_http_status_override = 502
-                    (
-                        _downstream_text,
-                        event_block,
-                        event,
-                        payload,
-                        event_type,
-                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                    # A failed retry must not hide an upstream quota response
+                    # (including its reset metadata) behind a synthetic 502.
+                    # Other replay failures remain fail-closed as
+                    # ``stream_incomplete`` because their original terminal is
+                    # not a status-bearing quota response.
+                    preserve_upstream_rate_limit = _http_error_status_from_payload(
+                        payload
+                    ) == 429 and retry_error_code in {
+                        "rate_limit_exceeded",
+                        "usage_limit_reached",
+                        "insufficient_quota",
+                        "usage_not_included",
+                        "quota_exceeded",
+                    }
+                    if preserve_upstream_rate_limit:
+                        _clear_websocket_request_error_overrides(status_request_state)
+                    else:
+                        status_request_state.error_http_status_override = 502
+                        (
+                            _downstream_text,
+                            event_block,
+                            event,
+                            payload,
+                            event_type,
+                        ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
         completed_usage = (
             event.response.usage if event_type == "response.completed" and event and event.response else None
@@ -4268,6 +4306,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             elif settlement_event and settlement_event.response:
                 error = settlement_event.response.error
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                if (
+                    error is None
+                    and _websocket_event_incomplete_reason(settlement_event_type, settlement_payload)
+                    == "stream_incomplete"
+                ):
+                    error_code = "stream_incomplete"
             _log_http_bridge_event(
                 "terminal_error",
                 session.key,

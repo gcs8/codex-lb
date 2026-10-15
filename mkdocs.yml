@@ -60,6 +60,7 @@ nav:
   - Live Voice: live-voice.md
   - Conversations: conversations.md
   - Usage Reporting: usage-reporting.md
+  - Metrics: metrics.md
   - Configuration: configuration.md
   - Anonymous Telemetry: telemetry.md
   - Authentication: authentication.md
@@ -73,6 +74,7 @@ nav:
       - Remote Access: deployment/remote.md
   - Reference:
       - Settings: reference/settings.md
+      - Session Retagging: session-retag.md
   - Traffic Parity: traffic-parity.md
   - Development:
       - Rust Migration Architecture: rust-architecture.md

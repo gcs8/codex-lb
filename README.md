@@ -63,7 +63,7 @@ see [Getting started](https://soju06.github.io/codex-lb/getting-started/).
 Point any OpenAI-compatible client at codex-lb. For Codex CLI, `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
@@ -72,6 +72,7 @@ name = "openai"  # required — enables remote /responses/compact. Lowercase sin
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
+supports_standalone_web_search = true # requires codex-lb >= 1.22.0
 requires_openai_auth = true # required for codex app
 ```
 
@@ -334,6 +335,12 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Abaddollyon"><img src="https://avatars.githubusercontent.com/u/31712865?v=4?s=100" width="100px;" alt="Abaddollyon"/><br /><sub><b>Abaddollyon</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjakl"><img src="https://avatars.githubusercontent.com/u/40384?v=4?s=100" width="100px;" alt="Markus Jakl"/><br /><sub><b>Markus Jakl</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Amjakl" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/uniskela"><img src="https://avatars.githubusercontent.com/u/104075208?v=4?s=100" width="100px;" alt="Uniskela"/><br /><sub><b>Uniskela</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=uniskela" title="Documentation">📖</a></td>
+
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/TheFoolThatDoesntBelongToThisEra"><img src="https://avatars.githubusercontent.com/u/252236154?v=4?s=100" width="100px;" alt="luawl (current account)"/><br /><sub><b>luawl (current account)</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=TheFoolThatDoesntBelongToThisEra" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=TheFoolThatDoesntBelongToThisEra" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/vitalNohj"><img src="https://avatars.githubusercontent.com/u/15671154?v=4?s=100" width="100px;" alt="Nohj"/><br /><sub><b>Nohj</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=vitalNohj" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AvitalNohj" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=vitalNohj" title="Tests">⚠️</a></td>
+
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/627444640"><img src="https://avatars.githubusercontent.com/u/59245770?v=4?s=100" width="100px;" alt="Vaughn"/><br /><sub><b>Vaughn</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=627444640" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=627444640" title="Tests">⚠️</a></td>
+
     </tr>
   </tbody>
 </table>

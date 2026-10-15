@@ -3,7 +3,9 @@
 ## Purpose
 
 Define proxy observability contracts so runtime failures, routing decisions, and admission rejections remain diagnosable.
+
 ## Requirements
+
 ### Requirement: Proxy 4xx/5xx responses are logged with error detail
 When the proxy returns a 4xx or 5xx response for a proxied request, the system MUST log the request id, method, path, status code, error code, and error message to the console. For local admission rejections, the log MUST also include the rejection stage or lane.
 
@@ -457,6 +459,8 @@ shared background task registries.
 ### Requirement: TTFT phase timings are persisted and exported
 The proxy MUST persist nullable low-cardinality request-log fields for TTFT phase analysis and MUST export equivalent Prometheus phase latency observations without labels containing raw API keys, raw session ids, raw affinity keys, request ids, or prompt text.
 
+HTTP Responses attempts MUST also populate the existing nullable `latency_first_upstream_event_ms` and `latency_response_created_ms` fields from actual upstream observations, measured from the same current attempt anchor as `latency_first_token_ms` and `latency_ms`. Pre-attempt selection/admission time MUST remain in `latency_queue_ms`. The first upstream data event and first `response.created` MUST be measured independently from first token-bearing output. Unobserved phases MUST remain null; legitimate zero-millisecond observations MUST be retained. Local heartbeat/comment/sentinel output MUST NOT create an upstream-event timestamp. Capturing these values MUST preserve existing lazy/verbatim SSE forwarding and the existing persistence/export owner.
+
 #### Scenario: HTTP bridge request records phase timing
 - **WHEN** a visible HTTP bridge request waits for session response-create admission and then receives upstream `response.created`
 - **THEN** the request log includes integer millisecond timing for response-create gate wait and upstream response-created latency
@@ -465,6 +469,21 @@ The proxy MUST persist nullable low-cardinality request-log fields for TTFT phas
 #### Scenario: First upstream event is distinct from first token
 - **WHEN** the upstream bridge reader receives an upstream event before text delta output
 - **THEN** the request log can record first upstream event latency separately from first downstream token latency
+
+#### Scenario: HTTP created precedes content
+- **WHEN** an HTTP attempt observes an upstream data event, `response.created`, and first token-bearing output at distinct controlled times
+- **THEN** the persisted first-event, created and first-token fields retain those distinct offsets from the existing attempt anchor
+- **AND** existing queue and total latency semantics are unchanged
+
+#### Scenario: Missing and immediate HTTP phases remain distinguishable
+- **WHEN** an HTTP attempt observes an event at its timing origin but never observes `response.created`
+- **THEN** first-upstream-event latency is zero and response-created latency is null
+- **AND** no terminal event or TTFT fallback invents a created timestamp
+
+#### Scenario: HTTP timing preserves the token fast path
+- **WHEN** later SSE token events qualify for existing verbatim relay
+- **THEN** phase timing does not force their parsing or re-serialization
+- **AND** the downstream event bytes and existing TTFT classification remain unchanged
 
 ### Requirement: Codex prewarm canary outcomes are observable
 
@@ -1390,3 +1409,69 @@ The system MUST provide a single migration head when the published affinity hist
 - **WHEN** only the merge revision is downgraded and then upgraded again
 - **THEN** both parent histories MUST remain applied and all schema and data MUST be preserved
 - **AND** the earlier credential projection MUST NOT run again
+
+### Requirement: Optional source metrics cannot interrupt valid forwarding
+
+Source usage parsing MUST preserve reported nonnegative integer reasoning tokens and reject boolean or database-integer-out-of-range token values. Missing reasoning details MUST remain unknown. Optional timing parsing MUST reject non-finite, negative, boolean, overflowing and database-integer-out-of-range values, including overflow when adding individually finite timings, without interrupting an otherwise valid upstream response. Streamed usage/metrics MUST parse complete SSE events, combining multiple data lines and preserving framing across chunk-split CRLF boundaries. Forwarded bytes MUST remain unchanged.
+
+#### Scenario: Overflowing timing sum is ignored
+
+- **GIVEN** individually finite source TTFT and generation timing whose sum overflows
+- **WHEN** the response is parsed
+- **THEN** optional timing remains absent and response forwarding completes normally
+
+#### Scenario: Multi-line usage event split at CRLF
+
+- **GIVEN** a valid SSE usage/metrics event contains several data lines and a network chunk ends between CR and LF
+- **WHEN** stream parsing completes
+- **THEN** usage, reasoning and timing match the equivalent single-chunk event
+
+#### Scenario: Unrepresentable source token count
+
+- **GIVEN** an upstream reports a token count outside the request-log database integer range
+- **WHEN** usage is parsed
+- **THEN** that usage is treated as unavailable rather than causing request-log persistence to overflow
+- **AND** the existing fail-closed behavior for API-key limits requiring usage is preserved
+
+### Requirement: Account pool metrics describe inventory and baseline routing eligibility
+
+When Prometheus support and metrics are enabled, the service MUST publish `codex_lb_accounts_total{status}` for every account status, including explicit zeroes, and a label-free `codex_lb_accounts_available` gauge. Accounts pending deletion MUST be excluded. Counts MUST derive from the committed account snapshot loaded by the existing routing-account cache refresh, without changing the cache's routing decisions. Each successful metrics scrape MUST refresh that snapshot before exposition; a failed refresh MUST return HTTP 503 instead of exposing an apparently current account snapshot.
+
+Availability MUST use `account_eligibility.ROUTABLE_STATUSES` and `reauth_access_token_is_expired`: active accounts count, and reauthentication-required accounts count unless their access token has a known expiry at or before the observation time. Unknown or unreadable expiry MUST retain the existing eligibility behavior. Availability MUST NOT apply model, API-key, affinity, quota, cooldown, health-tier, or concurrency filters and MUST NOT claim that a particular request can be served.
+
+In multiprocess mode these shared-pool gauges MUST expose the most recently published live-worker observation per series without a PID label or summation across workers. A newer zero MUST replace an older nonzero count. When Prometheus is absent, account-cache refresh MUST continue without metric publication or token decryption for metrics.
+
+#### Scenario: Empty and changed inventory
+
+- **GIVEN** an empty account pool
+- **WHEN** metrics are scraped
+- **THEN** all account-status series and availability are zero
+- **WHEN** accounts are added, change status, become pending deletion, or are deleted
+- **THEN** the next scrape reflects their committed state and clears obsolete nonzero status values without requiring proxy traffic
+
+#### Scenario: Reauthentication token expires in a quiet pool
+
+- **GIVEN** an active account and reauthentication-required accounts with future, expired, and unknown access-token expiry
+- **WHEN** metrics are scraped
+- **THEN** availability counts the active account and the reauthentication accounts with future or unknown expiry
+- **WHEN** the future expiry is reached without a database mutation or proxy request
+- **THEN** the next scrape excludes that account from availability while preserving its stored status count
+
+#### Scenario: Replicated counts decrease
+
+- **GIVEN** two live workers have published observations of the same account pool
+- **WHEN** metrics are scraped with multiprocess aggregation
+- **THEN** each account series uses the newest live observation without adding a PID label or summing duplicate inventory
+- **AND** a newer empty-pool observation replaces an older populated observation
+
+#### Scenario: Database refresh fails
+
+- **GIVEN** the previous account snapshot is populated
+- **WHEN** a metrics scrape cannot refresh it from the database
+- **THEN** the scrape returns HTTP 503 without reporting stale or fabricated account counts as a successful observation
+
+#### Scenario: Prometheus is not installed
+
+- **GIVEN** the optional Prometheus client is absent
+- **WHEN** the routing-account cache refreshes
+- **THEN** routing-cache behavior is preserved and metric publication is a no-op

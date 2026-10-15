@@ -317,6 +317,21 @@ Local failure events and locally assigned response IDs are separate facts. `Pars
 
 Canonical background JSON acknowledgements with status `queued` or `in_progress` carry the same authoritative response identity as SSE lifecycle events. The lifecycle parser includes both, and the HTTP relay keeps queued events on the parsed path. For example, a two-account request receiving a queued acknowledgement can immediately route a same-process continuation to its known account while its originating log is pending. An in-progress event following token output has the same ownership behavior. The provider still decides whether unfinished work can be continued.
 
+## Owner-forward SSE framing
+
+The [owner-forward framing contract](spec.md#requirement-owner-forward-http-streams-preserve-sse-event-boundaries)
+uses the canonical CR/LF separator detector while retaining the bridge's own
+scheduler and request budget. For example, a created event ending in
+`\r\n\r\n` followed by a completed event now reaches the origin as two events
+before EOF. A trailing CR can dispatch immediately; the following LF, if any,
+belongs to that ending rather than the next event.
+
+Malformed UTF-8 decodes as U+FFFD, including final unterminated bytes; downstream
+JSON validation still applies. Valid multi-byte UTF-8 split across chunks was
+already buffered safely and remains intact. Ordinary owners emit LF, making
+this compatibility hardening for the receiver. No migration, operator setting,
+account-selection change, or new event-size policy is involved.
+
 ## Detached retirement sweep deadline
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
@@ -328,3 +343,23 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Subagent messages after HTTP bridge replacement
+
+Codex can append an `agent_message` when a subagent interrupts generation.
+Treating that input as an unsupported replay suffix caused complete cumulative
+requests to receive an old socket's `store=false` anchor. The replacement socket
+then rejected the anchor, even though the client had supplied enough history.
+
+The same-owner context proof recognizes a well-formed agent message after
+retained assistant output or an exactly settled durable tool-call manifest.
+For example, `[stored user input, custom call, matching output, agent message]`
+can start on a replacement socket using the original input and encrypted
+content. A missing output cannot be filled in by the agent message. The proof
+does not make the payload portable: unavailable-owner fallback and retirement
+cannot move that original body to another account. Account-neutral recovery
+retains its separate eligibility and projection rules.
+
+## Health persistence after a terminal response
+
+A failed account-error health write must not replace a Responses terminal that the client already received. For example, a quota failure followed by a database error must retain the original quota terminal and log the health failure. The retry loop contains ordinary post-terminal health exceptions after reservation settlement; it preserves cancellation and pre-terminal retry decisions. Issue #2033 has both a public `/v1/responses` regression and stream-handler coverage for keyed owner continuations. The implementation and excluded pre-terminal setups are recorded in `openspec/changes/archive/2026-09-10-fix-post-terminal-health-failures/context.md`.
