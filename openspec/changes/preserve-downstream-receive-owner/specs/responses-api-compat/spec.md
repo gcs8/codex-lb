@@ -20,3 +20,25 @@ Retaining ingress MUST NOT change account ownership, explicit caller, file, MCP 
 - **WHEN** the downstream scope is cancelled with a blocked receive owner
 - **THEN** final connection cleanup cancels and joins that owner within its existing bound
 - **AND** request, reservation and lease cleanup retains its existing single-owner behavior
+
+#### Scenario: Retiring generation has observed an eligible next turn
+
+- **GIVEN** a poll deadline has elapsed without cancelling the receive that consumed the next create
+- **AND** the retiring generation subsequently observes that exact create before a clean close and before visible output
+- **WHEN** existing replay policy admits its replacement attempt
+- **THEN** the replacement receives exactly one eligible replay with the same request state and reservation
+- **AND** the original request start and one-shot replay budget are preserved
+- **AND** terminal settlement and request-log attribution belong to the successful dispatch owner exactly once
+
+#### Scenario: Connection teardown owns the final receive
+
+- **WHEN** a client disconnects, the downstream scope is cancelled, the server drains or the connection reaches its ordinary idle deadline
+- **THEN** connection teardown joins the remaining receive owner, including a frame suspended after ASGI dequeue
+- **AND** a raw frame not admitted before teardown creates no request reservation or upstream dispatch
+- **AND** ordinary idle closure does not penalize an otherwise healthy account
+
+#### Scenario: Queued pinned continuation retains its owner
+
+- **WHEN** an explicit caller anchor, file-owned input, anchored MCP approval or anchored opaque item crosses a clean-close ingress handoff
+- **THEN** normal preparation and account selection preserve its original hard owner and exact input
+- **AND** retaining that frame grants neither cross-account fallback nor new replay eligibility

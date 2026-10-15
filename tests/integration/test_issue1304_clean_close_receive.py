@@ -2,8 +2,8 @@
 
 The ASGI boundary pauses only after the real socket receive dequeues turn two.
 This models an adapter suspension point, not the proxy or upstream transport.
-No production coordinator is replaced. This regression intentionally remains RED
-until the shared mixin owner can implement persistent downstream task ownership.
+No production coordinator is replaced. The committed predecessor's public RED
+is retained in the lane evidence; this fixture also qualifies the receive owner.
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ async def test_queued_create_survives_clean_close_and_poll(
         async def wait(self, fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
             result = await asyncio.wait(fs, timeout=timeout, return_when=return_when)
             if not result[0] and queued.is_set():
+                operation_order.append("poll_timeout")
                 poll_elapsed.set()
             return result
 

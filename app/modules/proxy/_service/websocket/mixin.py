@@ -1493,6 +1493,7 @@ class _WebSocketMixin:
         upstream: UpstreamWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
+        downstream_receive_task: asyncio.Task[Any] | None = None
         continuity_state = proxy._websocket_continuity_state_for_request(
             headers,
             api_key=api_key,
@@ -1614,6 +1615,26 @@ class _WebSocketMixin:
             upstream_control.replay_request_state = None
             return reader_replay
 
+        async def poll_receive(timeout: float) -> Any:
+            nonlocal downstream_receive_task
+            # Ingress belongs to the downstream connection, not an upstream
+            # generation. A deadline must not cancel a receive that may have
+            # already dequeued a frame inside the ASGI adapter.
+            scheduler = scheduler_for(proxy)
+            if downstream_receive_task is None:
+                downstream_receive_task = scheduler.create_task(
+                    websocket.receive(), name="proxy-websocket-downstream-receive"
+                )
+            done, _ = await scheduler.wait({downstream_receive_task}, timeout=timeout)
+            if not done:
+                raise asyncio.TimeoutError
+            try:
+                return downstream_receive_task.result()
+            finally:
+                # Transfer the result once, without an intervening await. No
+                # next receive is started until the normal consumer returns.
+                downstream_receive_task = None
+
         try:
             while True:
                 if upstream_reader is not None and upstream_reader.done():
@@ -1727,11 +1748,8 @@ class _WebSocketMixin:
                                 break
                     message: Any | None = None
                     try:
-                        message = await scheduler_for(proxy).wait_for(
-                            websocket.receive(),
-                            timeout=min(
-                                downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
-                            ),
+                        message = await poll_receive(
+                            min(downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS),
                         )
                     except asyncio.TimeoutError:
                         if shutdown_state.is_draining():
@@ -1757,7 +1775,7 @@ class _WebSocketMixin:
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
                                 try:
-                                    message = await scheduler_for(proxy).wait_for(websocket.receive(), timeout=0.05)
+                                    message = await poll_receive(0.05)
                                 except asyncio.TimeoutError:
                                     try:
                                         await websocket.close(
@@ -2982,6 +3000,22 @@ class _WebSocketMixin:
                 nonlocal request_state_to_fail
                 nonlocal retired_create_lease_release_task
                 nonlocal upstream_reader
+                nonlocal downstream_receive_task
+                if downstream_receive_task is not None:
+                    cleanup_phase = "downstream_receive"
+                    try:
+                        await _facade()._await_cancelled_task(
+                            downstream_receive_task,
+                            timeout_seconds=current_cleanup_timeout(),
+                            label="proxy websocket downstream receive",
+                            cleanup_tasks=proxy._background_cleanup_tasks,
+                            scheduler=scheduler_for(proxy),
+                        )
+                    except Exception:
+                        _facade().logger.warning(
+                            "Downstream websocket receive failed during scope cleanup", exc_info=True
+                        )
+                    downstream_receive_task = None
                 reader_to_await = upstream_reader
                 if reader_to_await is not None and not upstream_reader_cancel_requested:
                     # Cancel exactly once before close. Some transports defer
