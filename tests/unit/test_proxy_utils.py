@@ -42174,6 +42174,156 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("deterministic_failover_enabled", [True, False])
+async def test_stream_previsible_quota_replay_respects_deterministic_failover(
+    monkeypatch,
+    deterministic_failover_enabled: bool,
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = deterministic_failover_enabled
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_stream_replay_owner")
+    replacement_account = _make_account("acc_stream_replay_replacement")
+    full_input: list[JsonValue] = [
+        {"type": "message", "id": "msg_first", "role": "user", "content": "first turn"},
+        {
+            "type": "message",
+            "id": "msg_previous_answer",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": "previous answer",
+        },
+        {"type": "reasoning", "id": "rs_owner", "encrypted_content": "owner-bound", "summary": []},
+        {"type": "message", "id": "msg_followup", "role": "user", "content": "fresh full resend"},
+    ]
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        assert kwargs.get("required_account_id") is None
+        if kwargs.get("exclude_account_ids") == {owner_account.id}:
+            assert kwargs.get("reallocate_sticky") is True
+            return AccountSelection(account=replacement_account, error_message=None)
+        assert not kwargs.get("exclude_account_ids")
+        return AccountSelection(account=owner_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        if account_id == owner_account.chatgpt_account_id:
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_owner_quota",'
+                '"status":"failed","error":{"code":"usage_limit_reached",'
+                '"message":"usage limit reached"},"usage":{"input_tokens":0,'
+                '"output_tokens":0,"total_tokens":0}}}\n\n'
+            )
+            return
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_replay_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test verified full replay",
+            "input": full_input,
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {})]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    if deterministic_failover_enabled:
+        assert terminal["type"] == "response.completed"
+        assert len(selection_calls) >= 2
+        assert len(streamed_payloads) == 2
+        assert streamed_payloads[1].input != full_input
+    else:
+        assert terminal["type"] == "response.failed"
+        assert len(streamed_payloads) == 1
+        assert streamed_payloads[0].input == payload.input
+
+
+@pytest.mark.asyncio
+async def test_stream_ownerless_account_neutral_quota_failover_with_deterministic_disabled(monkeypatch):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    first_account = _make_account("acc_stream_ownerless_first")
+    replacement_account = _make_account("acc_stream_ownerless_replacement")
+    selection_calls: list[dict[str, object]] = []
+    streamed_account_ids: list[str | None] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        excluded = kwargs.get("exclude_account_ids")
+        if excluded == {first_account.id}:
+            return AccountSelection(account=replacement_account, error_message=None)
+        assert not excluded
+        assert kwargs.get("required_account_id") is None
+        return AccountSelection(account=first_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        streamed_account_ids.append(account_id)
+        if account_id == first_account.chatgpt_account_id:
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_ownerless_quota",'
+                '"status":"failed","error":{"code":"usage_limit_reached",'
+                '"message":"usage limit reached"},"usage":{"input_tokens":0,'
+                '"output_tokens":0,"total_tokens":0}}}\n\n'
+            )
+            return
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ownerless_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "quota"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "account-neutral request",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {})]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert len(selection_calls) >= 2
+    assert streamed_account_ids == [first_account.chatgpt_account_id, replacement_account.chatgpt_account_id]
+
+
+@pytest.mark.asyncio
 async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connect_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
