@@ -82,8 +82,14 @@ def test_warn_removed_settings_scans_env_files(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr("app.core.config.settings.ENV_FILES", (tmp_path / ".env", env_file))
     monkeypatch.delenv("CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS", raising=False)
 
-    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
-        found = warn_removed_settings()
+    # Check warning content, not incidental digits in pytest's source-line metadata.
+    original_formatter = caplog.handler.formatter
+    try:
+        caplog.handler.setFormatter(logging.Formatter("%(message)s"))
+        with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+            found = warn_removed_settings()
+    finally:
+        caplog.handler.setFormatter(original_formatter)
 
     assert found == ["CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS"]
     assert "64" not in caplog.text
