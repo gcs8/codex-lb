@@ -25,9 +25,13 @@ model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
+[features]
+api_key_model_discovery = true
+
 [model_providers.codex-lb]
 name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 supports_websockets = true
 supports_standalone_web_search = true # requires codex-lb >= 1.22.0
@@ -46,6 +50,22 @@ preference. This provider capability is separate from the experimental
 of this setup. The Codex version and selected model must also support standalone
 search. See [OpenAI's web-search documentation](https://learn.chatgpt.com/docs/web-search)
 and the [standalone search proxy specification](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/spec.md#requirement-standalone-codex-web-search-is-forwarded-faithfully).
+
+### Model discovery in the Codex app
+
+Verified with Codex 0.159.0: a provider configured with `env_key` uses API-key
+model discovery even when `requires_openai_auth = true`. For a custom
+`base_url`, discovery needs both `features.api_key_model_discovery = true`
+and an explicit `model_catalog_url`. Without both, Codex uses its bundled
+model list and can omit models that codex-lb already advertises. Selecting
+a model with `model = "..."` does not itself refresh the picker.
+
+The examples include both settings. Keep each catalog URL on the same host
+and port as its provider's `base_url`; update both when using a remote
+installation. Merge these keys into existing `[features]` and provider
+tables rather than duplicating the tables, then fully quit and reopen the
+Codex app. See the [model discovery context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/model-catalog-compat/context.md#codex-client-discovery)
+for the client-side conditions and verification scope.
 
 ### Opting into the 872k context window
 
@@ -85,6 +105,7 @@ First add this opt-in provider to the same machine-local
 [model_providers.codex-lb-daybreak-blue]
 name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true
@@ -183,9 +204,13 @@ environment proxies and connect directly.
 When [API key auth](api-keys.md) is enabled:
 
 ```toml
+[features]
+api_key_model_discovery = true
+
 [model_providers.codex-lb]
 name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true
