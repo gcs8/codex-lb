@@ -35,6 +35,7 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 import app.core.clients.proxy as proxy_module
+import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.core.openai.requests as openai_requests_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
@@ -9635,6 +9636,7 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
             "model": "gpt-5.6-sol",
             "instructions": "",
             "input": [additional_tools, {"role": "user", "content": "inspect"}],
+            "parallel_tool_calls": True,
             "client_metadata": {
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
@@ -9668,6 +9670,7 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
     upstream_headers = cast(dict[str, str], session.post_calls[0]["headers"])
     assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
     upstream_payload = cast(dict[str, object], session.post_calls[0]["json"])
+    assert upstream_payload["parallel_tool_calls"] is False
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert upstream_payload["client_metadata"] == {
         "keep": "yes",
@@ -9717,6 +9720,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
             "model": "gpt-5.6-sol",
             "instructions": "hi",
             "input": [additional_tools, {"role": "user", "content": "hi"}],
+            "parallel_tool_calls": True,
             "client_metadata": {
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
@@ -9752,6 +9756,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
         "effort": "high",
         "vendor_hint": 7,
     }
+    expected_request_payload["parallel_tool_calls"] = False
     assert request_payload == expected_request_payload
     assert "context" not in cast(Mapping[str, JsonValue], payload.to_payload()["reasoning"])
     upstream_headers = cast(dict[str, str], session.ws_calls[0]["headers"])
@@ -12732,6 +12737,7 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
     assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
     upstream_payload = cast(dict[str, object], session.calls[0]["json"])
+    assert upstream_payload["parallel_tool_calls"] is False
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert cast(list[object], upstream_payload["input"])[1] == developer_instructions
     assert upstream_payload["reasoning"] == {
@@ -15643,6 +15649,102 @@ async def test_stream_responses_preserves_usage_limit_reset_hint(monkeypatch):
     assert event["response"]["error"]["resets_at"] == 1_700_003_600
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "usage_limit_reached"
+
+
+def test_response_failed_event_from_upstream_error_preserves_reset_metadata():
+    event = streaming_retry_module._response_failed_event_from_upstream_error(
+        "rate_limit_exceeded",
+        {"message": "quota exhausted", "resets_at": 1_700_003_600, "resets_in_seconds": 3600},
+        response_id="resp-rate-limit",
+    )
+
+    assert event["response"]["error"] == {
+        "message": "quota exhausted",
+        "type": "server_error",
+        "code": "rate_limit_exceeded",
+        "resets_at": 1_700_003_600,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_post_refresh_transient_terminal_preserves_reset_metadata(monkeypatch):
+    """The post-refresh transient terminal must keep the upstream reset timestamp.
+
+    The last-account branch of ``_stream_post_refresh_with_capacity_recovery``
+    surfaces the exhausted retryable error directly, so it has to build that
+    ``response.failed`` through the reset-preserving helper. A wrapper that
+    carries ``resets_at`` but loses it here leaves the client guessing when the
+    quota window reopens.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_reset_metadata")
+    stream_once_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    # The single outer attempt makes ``can_try_other_account`` False, which is
+    # the only path that renders the terminal instead of re-raising 502.
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_service._TransientStreamError(
+            "usage_limit_reached",
+            cast(
+                UpstreamError,
+                {
+                    "message": "The usage limit has been reached",
+                    "resets_at": 1_700_003_600,
+                    "resets_in_seconds": 3600,
+                },
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-reset-metadata"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert stream_once_calls == 2
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["code"] == "usage_limit_reached"
+    assert terminal["response"]["error"]["resets_at"] == 1_700_003_600
 
 
 @pytest.mark.asyncio
@@ -24451,8 +24553,99 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
     record_error.assert_awaited_once_with(account_a)
 
 
+@pytest.mark.parametrize("owner_bound", [True, False], ids=["required-owner", "movable"])
+@pytest.mark.parametrize("retryable", [True, False], ids=["retryable-envelope", "plain-forbidden"])
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
+async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkeypatch, caplog, owner_bound, retryable):
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_ws_403_owner")
+    other = _make_account("acc_ws_403_other")
+    body = (
+        b'{"error":{"type":"server_error","code":"upstream_error","message":"Invalid response status"}}'
+        if retryable
+        else None
+    )
+    payload = proxy_websocket_module._handshake_error_payload(403, "Invalid response status", body=body)
+    handshake_error = proxy_module.ProxyResponseError(403, payload, failure_phase="connect")
+    upstream = SimpleNamespace()
+    pool_select = AsyncMock(
+        side_effect=[
+            AccountSelection(account=owner, error_message=None),
+            AccountSelection(account=other, error_message=None),
+        ]
+    )
+    open_upstream = AsyncMock(side_effect=[handshake_error, upstream])
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", pool_select)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **_kw: account))
+    monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_403_owner",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=service._clock.monotonic(),
+        replay_required_account_id=owner.id if owner_bound else None,
+    )
+    websocket_send = AsyncMock()
+    result = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model=request_state.model,
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+    )
+
+    first_selection = pool_select.await_args_list[0]
+    assert first_selection.kwargs.get("required_account_is_ownership_constraint", False) is owner_bound
+    assert first_selection.kwargs.get("required_account_id") == (owner.id if owner_bound else None)
+
+    if retryable and not owner_bound:
+        assert result == (other, upstream)
+        assert pool_select.await_count == 2
+        assert pool_select.await_args is not None
+        assert pool_select.await_args.kwargs["exclude_account_ids"] == {owner.id}
+        assert [call.args[0].id for call in open_upstream.await_args_list] == [owner.id, other.id]
+        websocket_send.assert_not_awaited()
+        return
+    assert result == (None, None)
+    pool_select.assert_awaited_once()
+    open_upstream.assert_awaited_once()
+    assert open_upstream.await_args is not None
+    assert open_upstream.await_args.args[0].id == owner.id
+    websocket_send.assert_awaited_once()
+    assert websocket_send.await_args is not None
+    sent = json.loads(websocket_send.await_args.args[0])
+    assert sent["status"] == 403
+    assert sent["error"] == payload["error"]
+    assert request_logs.calls[0]["error_code"] == ("upstream_error" if retryable else "forbidden")
+    assert request_logs.calls[0]["account_id"] == owner.id
+    assert request_state.replay_required_account_id == (owner.id if owner_bound else None)
+    assert "action=surface" in caplog.text
+    assert "action=failover_next" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [("usage_limit_reached", "usage limit reached"), ("insufficient_quota", "You exceeded your current quota")],
+    ids=["rate-limit", "quota"],
+)
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(
+    monkeypatch, error_code, error_message
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_owner = _make_account("acc_ws_prev_owner")
@@ -24468,13 +24661,15 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
         return AccountSelection(account=account_other, error_message=None)
 
     mark_rate_limit = AsyncMock()
+    mark_quota_exceeded = AsyncMock()
     first_handshake_error = proxy_module.ProxyResponseError(
         429,
-        openai_error("usage_limit_reached", "usage limit reached"),
+        openai_error(error_code, error_message),
     )
 
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
+    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", mark_quota_exceeded)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error]))
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -24508,20 +24703,25 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
 
     assert selected_account is None
     assert selected_upstream is None
-    assert seen_excluded_account_ids == [set(), {account_owner.id}]
-    mark_rate_limit.assert_awaited_once()
-    mark_call = mark_rate_limit.await_args
+    assert seen_excluded_account_ids == [set()]
+    if error_code == "usage_limit_reached":
+        mark_rate_limit.assert_awaited_once()
+        mark_quota_exceeded.assert_not_awaited()
+        mark_call = mark_rate_limit.await_args
+    else:
+        mark_quota_exceeded.assert_awaited_once()
+        mark_rate_limit.assert_not_awaited()
+        mark_call = mark_quota_exceeded.await_args
     assert mark_call is not None
     assert mark_call.args[0] == account_owner
-    assert mark_call.args[1]["message"] == "usage limit reached"
+    assert mark_call.args[1]["message"] == error_message
     await_args = websocket_send.await_args
     assert await_args is not None
     sent_payload = json.loads(await_args.args[0])
-    assert sent_payload["status"] == 502
-    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
-    assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"] == first_handshake_error.payload["error"]
     assert request_logs.calls[0]["request_id"] == "ws_req_prev_owner_handshake_429"
-    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert request_logs.calls[0]["error_code"] == error_code
     assert request_logs.calls[0]["account_id"] == account_owner.id
 
 
@@ -24578,13 +24778,13 @@ async def test_connect_proxy_websocket_account_bound_replay_stays_on_owner(monke
 
     assert selected_account is None
     assert selected_upstream is None
-    assert select_account.await_count == 2
-    assert select_account.await_args_list[1].kwargs["preferred_account_id"] == account_owner.id
+    select_account.assert_awaited_once()
     open_upstream.assert_awaited_once()
     websocket_send_args = websocket_send.await_args
     assert websocket_send_args is not None
     sent_payload = json.loads(websocket_send_args.args[0])
-    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"] == handshake_error.payload["error"]
 
 
 @pytest.mark.asyncio
@@ -27484,6 +27684,39 @@ def test_websocket_client_previous_response_full_resend_retry_requires_matching_
             continuity_state=continuity_state,
         )
         is False
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_rejects_delta_chained_to_empty_prewarm() -> None:
+    prewarm_input: list[JsonValue] = [
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "workspace rules"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        empty_prewarm_response_id="resp_prewarm",
+        empty_prewarm_input_count=len(prewarm_input),
+        empty_prewarm_input_fingerprint=proxy_service._fingerprint_input_items(prewarm_input),
+    )
+    turn_delta: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "environment context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "summarize the notes"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=turn_delta,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=[*prewarm_input, *turn_delta],
+            continuity_state=continuity_state,
+        )
+        is True
     )
 
 
@@ -30799,6 +31032,55 @@ async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor
     assert continuity_state.last_completed_response_id == "resp_existing"
     assert continuity_state.last_completed_input_count == 2
     assert continuity_state.last_completed_input_prefix_fingerprint == "existing-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_finalize_replayed_websocket_empty_prewarm_records_client_visible_id(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_prewarm_replayed")
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock())
+
+    payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_prewarm_hidden",
+            "usage": {"input_tokens": 9, "output_tokens": 0, "total_tokens": 9},
+        },
+    }
+    continuity_state = proxy_service._WebSocketContinuityState()
+    # The replay's upstream id stays hidden: every downstream event is rewritten
+    # to the id the client received first, so the next turn chains to that id.
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prewarm_replayed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        input_item_count=1,
+        input_full_fingerprint="prewarm-fingerprint",
+        response_id="resp_ws_prewarm_hidden",
+        replay_count=1,
+        replay_downstream_response_id="resp_ws_prewarm_visible",
+    )
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        continuity_state=continuity_state,
+    )
+
+    assert continuity_state.empty_prewarm_response_id == "resp_ws_prewarm_visible"
+    assert continuity_state.empty_prewarm_input_count == 1
+    assert continuity_state.empty_prewarm_input_fingerprint == "prewarm-fingerprint"
 
 
 @pytest.mark.asyncio
@@ -54068,7 +54350,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
     # JSON-parsed; usage settlement from the parsed terminal frame is
     # unchanged.
-    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+    from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -54083,8 +54365,8 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
-    mixin_parse = MagicMock(wraps=streaming_mixin_module.parse_sse_data_json)
-    monkeypatch.setattr(streaming_mixin_module, "parse_sse_data_json", mixin_parse)
+    stream_parse = MagicMock(wraps=streaming_helpers_module.parse_sse_data_json)
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", stream_parse)
 
     verbatim_delta = (
         'event: response.output_text.delta\ndata: {"type": "response.output_text.delta", "delta": "안녕 upstream"}\n\n'
@@ -54121,7 +54403,7 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     # created (lifecycle), the first delta (TTFT window still open), and
     # completed (lifecycle) are parsed; the settled second delta is relayed
     # without any JSON parse.
-    assert mixin_parse.call_count == 3
+    assert stream_parse.call_count == 3
     # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
     # spacing, not the ensure_ascii canonical re-encode.
     assert chunks[2] == verbatim_delta

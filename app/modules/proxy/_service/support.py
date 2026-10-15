@@ -1074,7 +1074,11 @@ class _WebSocketRequestState:
     clean_close_retry_close_generation: int | None = None
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
+    model_rejection_replay_count: int = 0
     force_refresh_account_id: str | None = None
+    # Set only after a forced refresh completes; cleared by auth replay or an
+    # account switch so an unrelated account cannot inherit the model retry.
+    completed_forced_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
     # A narrowly classified pre-acceptance account/model rejection may move
     # once to another account. Keep the original upstream error until that
@@ -1558,6 +1562,9 @@ class _WebSocketContinuityState:
     last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     responses_lite_model: str | None = None
     responses_lite_response_id: str | None = None
+    empty_prewarm_response_id: str | None = None
+    empty_prewarm_input_count: int = 0
+    empty_prewarm_input_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1833,7 +1833,10 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(monkeypatch) -> None:
+@pytest.mark.parametrize("plan_type, minutes", [("free", 43200), ("team", 43800)])
+async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
+    monkeypatch, plan_type, minutes
+) -> None:
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1843,7 +1846,7 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
                     "primary_window": {
                         "used_percent": 24.0,
                         "reset_at": 1735689600,
-                        "limit_window_seconds": 2592000,
+                        "limit_window_seconds": minutes * 60,
                     },
                     "secondary_window": None,
                 },
@@ -1858,7 +1861,7 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
     account = _make_account("acc_free_monthly", "workspace_shared")
     account.status = AccountStatus.QUOTA_EXCEEDED
-    account.plan_type = "free"
+    account.plan_type = plan_type
     accounts_repo.accounts_by_id[account.id] = account
 
     await updater.refresh_accounts([account], latest_usage={})
@@ -3013,6 +3016,33 @@ async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
     assert accounts_repo.status_updates == []
     assert routing_unavailable_calls == []
     assert expected_message in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_deactivated_workspace_excludes_only_its_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return usage_client_module._usage_payload_or_raise(
+            {"error": {"code": "deactivated_workspace", "message": "Workspace has been deactivated"}},
+            402,
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    routing_unavailable_calls: list[str] = []
+    monkeypatch.setattr(usage_updater_module, "mark_account_routing_unavailable", routing_unavailable_calls.append)
+    unavailable = _make_account("workspace_a", "workspace_a", email="shared@example.test")
+    healthy = _make_account("workspace_b", "workspace_b", email="shared@example.test")
+    unavailable.chatgpt_user_id = healthy.chatgpt_user_id = "shared_user"
+    accounts_repo = StubAccountsRepository()
+    accounts_repo.accounts_by_id.update({unavailable.id: unavailable, healthy.id: healthy})
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=accounts_repo)
+
+    assert await updater.refresh_accounts([unavailable], latest_usage={}) is False
+    assert unavailable.status == AccountStatus.DEACTIVATED
+    assert unavailable.deactivation_reason == "Usage API error: HTTP 402 - Workspace has been deactivated"
+    assert healthy.status == AccountStatus.ACTIVE
+    assert healthy.deactivation_reason is None
+    assert routing_unavailable_calls == [unavailable.id]
+    assert [update["account_id"] for update in accounts_repo.status_updates] == [unavailable.id]
 
 
 @pytest.mark.asyncio

@@ -138,6 +138,25 @@ _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhau
 _STREAM_HEALTH_RECORDED_ATTR = "_codex_lb_stream_health_recorded"
 
 
+def _response_failed_event_from_upstream_error(
+    code: str,
+    error: UpstreamError,
+    *,
+    response_id: str | None,
+) -> Any:
+    """Build a terminal event without dropping the upstream reset timestamp."""
+    message = str(error.get("message") or "Upstream error")
+    resets_at = error.get("resets_at")
+    if isinstance(resets_at, bool) or not isinstance(resets_at, int | float):
+        resets_at = None
+    return response_failed_event(
+        code,
+        message,
+        response_id=response_id,
+        resets_at=resets_at,
+    )
+
+
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
     normalized_policy = policy.strip().lower()
     if normalized_policy not in _HTTP_DOWNSTREAM_TRANSPORT_POLICIES:
@@ -1130,9 +1149,9 @@ class _StreamingRetryMixin:
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
                         raise retry_exc from exc
                     yield format_sse_event(
-                        response_failed_event(
+                        _response_failed_event_from_upstream_error(
                             exc.code,
-                            error_message,
+                            exc.error,
                             response_id=settlement.response_id or request_id,
                         )
                     )
@@ -1737,12 +1756,12 @@ class _StreamingRetryMixin:
                     if propagate_http_errors and last_transient_exc is not None:
                         raise last_transient_exc
                     if last_retryable_stream_error is not None:
-                        error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
-                        event = response_failed_event(
+                        event = _response_failed_event_from_upstream_error(
                             last_retryable_stream_error.code,
-                            error_message,
+                            last_retryable_stream_error.error,
                             response_id=request_id,
                         )
+                        error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
                         yield format_sse_event(event)
                         await proxy._write_request_log(
                             affinity_observation=affinity_observation,
@@ -2724,13 +2743,25 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=tex.status_code,
-                                    **_retry_after_kwargs(tex.retry_after_seconds),
-                                )
+                                # Workspace failures are terminal for this
+                                # owner; defer keyed health until settlement.
+                                # Preserve the existing policy for other codes.
+                                if classified["failure_class"] == "account_unavailable":
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        retry_after_seconds=tex.retry_after_seconds,
+                                    )
+                                else:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        **_retry_after_kwargs(tex.retry_after_seconds),
+                                    )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
                                     _stamp_surfaced_burst_retry_after(tex)
@@ -3603,12 +3634,12 @@ class _StreamingRetryMixin:
                 yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
                 return
             if last_retryable_stream_error is not None:
-                retries_exhausted_msg = str(last_retryable_stream_error.error.get("message") or "Upstream error")
-                event = response_failed_event(
+                event = _response_failed_event_from_upstream_error(
                     last_retryable_stream_error.code,
-                    retries_exhausted_msg,
+                    last_retryable_stream_error.error,
                     response_id=request_id,
                 )
+                retries_exhausted_msg = str(last_retryable_stream_error.error.get("message") or "Upstream error")
                 if last_retryable_stream_error.code in SYNTHETIC_TRANSPORT_FAILURE_CODES:
                     event = synthetic_transport_failure_event(event)
                 if not (

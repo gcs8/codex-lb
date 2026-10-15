@@ -4,9 +4,10 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -17,6 +18,7 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.downstream_delivery as downstream_delivery_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.openai.models import CompactResponsePayload
@@ -25,8 +27,12 @@ from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service import request_log as request_log_module
+from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
+from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.downstream_delivery import (
     OUTCOME_TERMINAL_AFTER_DISCONNECT,
     OUTCOME_TERMINAL_WRITTEN,
@@ -34,8 +40,185 @@ from app.modules.proxy.downstream_delivery import (
 )
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "distinct_phases",
+        "zero_created",
+        "missing_created",
+        "empty",
+        "no_headers",
+        "oversized",
+        "upstream_error",
+        "normalized_upstream_error",
+    ],
+)
+async def test_http_phase_timings_use_observed_upstream_events_and_persist(
+    async_client, app_instance, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    auth = _make_auth_json("phase-account", "phase-timing@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    )
+    assert imported.status_code == 200
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "http"
+    proxy_module.get_settings().proxy_request_budget_seconds = 4.0
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: None)
+
+    # Inject the service clock used by the production timing seam; asyncio's
+    # scheduler and real deadlines remain untouched.
+    started_at = time.monotonic()
+    clock = VirtualClock(monotonic_value=started_at, epoch_value=time.time())
+    service = get_proxy_service_for_app(app_instance)
+    service._clock = clock
+    admission = service._get_work_admission()
+    acquire = admission.acquire_response_create
+
+    async def timed_admission(*args, **kwargs):
+        lease = await acquire(*args, **kwargs)
+        clock.step_to(started_at + 0.5)
+        return lease
+
+    monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
+    created = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_http_phase"}}\n\n'
+    delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+    fast_delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":" world"}\n\n'
+    completed = (
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_http_phase",'
+        '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}\n\n'
+    )
+    blocks = [(1.5, delta), (1.75, fast_delta), (2.0, completed)]
+    expected_first, expected_created, expected_ttft = 250, None, 1000
+    if case == "distinct_phases":
+        blocks[:0] = [
+            (0.75, 'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n'),
+            (1.0, created),
+        ]
+        expected_created = 500
+    elif case == "zero_created":
+        blocks[:0] = [(0.5, created), (0.75, created)]
+        expected_first = expected_created = 0
+    elif case == "missing_created":
+        blocks[0] = (0.75, delta)
+        expected_ttft = 250
+    elif case in {"empty", "no_headers"}:
+        blocks = []
+        expected_first = expected_ttft = None
+    elif case == "oversized":
+        monkeypatch.setattr(proxy_client_module, "MAX_SSE_EVENT_BYTES", 1024)
+        blocks = [(0.75, 'data: {"type":"response.output_text.delta","delta":"' + "x" * 2048 + '"}\n\n')]
+        expected_first = expected_ttft = None
+    elif case == "normalized_upstream_error":
+        blocks = [
+            (0.75, 'data: {"error":{"code":"server_error","message":"Upstream failure","type":"server_error"}}\n\n')
+        ]
+        expected_ttft = None
+    else:
+        blocks = [
+            (
+                0.75,
+                'event: response.failed\ndata: {"type":"response.failed","response":{"id":"resp_http_phase",'
+                '"error":{"code":"stream_incomplete","message":"Upstream failure","type":"server_error"}}}\n\n',
+            )
+        ]
+        expected_ttft = None
+
+    class ScriptedContent:
+        async def iter_chunked(self, _size):
+            for offset, block in blocks:
+                clock.step_to(started_at + offset)
+                yield block.encode()
+
+    class ScriptedResponse:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+        content = ScriptedContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    calls = 0
+
+    def scripted_post(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if case == "no_headers":
+            raise proxy_client_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+        return ScriptedResponse()
+
+    monkeypatch.setattr(get_http_client().session, "post", scripted_post)
+    parsed_lines: list[str] = []
+    parse = streaming_helpers_module.parse_sse_data_json
+
+    def observed_parse(line: str):
+        parsed_lines.append(line)
+        return parse(line)
+
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", observed_parse)
+
+    def phase_samples() -> dict[tuple[str, str], float]:
+        metric = request_log_module.proxy_phase_latency_seconds
+        if metric is None:
+            return {}
+        return {
+            (sample.name, sample.labels["phase"]): float(sample.value)
+            for family in cast(Any, metric).collect()
+            for sample in family.samples
+            if sample.name.endswith(("_sum", "_count"))
+            and sample.labels["transport"] == "http"
+            and sample.labels["upstream_transport"] == "http"
+            and sample.labels["model_class"] == _extract_model_class("gpt-5.4")
+        }
+
+    before_metrics = phase_samples()
+
+    async def request():
+        return await async_client.post(
+            "/v1/responses"
+            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error"}
+            else "/backend-api/codex/responses",
+            json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+            headers={"user-agent": "codex_cli_rs/0.153.2", "x-request-id": "req_http_phase"},
+        )
+
+    response = await request()
+    assert calls == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(RequestLog).where(RequestLog.account_id.is_not(None)))).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.latency_queue_ms == 500
+    assert row.latency_first_token_ms == expected_ttft
+    assert row.latency_first_upstream_event_ms == expected_first
+    assert row.latency_response_created_ms == expected_created
+    if case == "oversized":
+        event = _extract_first_event(response.text.splitlines())
+        assert event["response"]["error"]["code"] == "stream_event_too_large"
+    if expected_ttft is not None:
+        assert response is not None
+        assert response.status_code == 200
+        assert fast_delta not in parsed_lines, "Later token frames must bypass payload parsing"
+        assert fast_delta in response.text
+    after_metrics = phase_samples()
+    if request_log_module.PROMETHEUS_AVAILABLE:
+        for phase, expected in (("first_upstream_event", expected_first), ("response_created", expected_created)):
+            count_key = ("codex_lb_proxy_phase_latency_seconds_count", phase)
+            sum_key = ("codex_lb_proxy_phase_latency_seconds_sum", phase)
+            assert after_metrics.get(count_key, 0) - before_metrics.get(count_key, 0) == (expected is not None)
+            assert after_metrics.get(sum_key, 0) - before_metrics.get(sum_key, 0) == pytest.approx(
+                (expected or 0) / 1000
+            )
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -609,29 +792,70 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
 
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
-    # The plain developer message is still hoisted into instructions, while the
-    # typed directive is forwarded upstream byte-identical (including keys the
-    # interleaved-reasoning sanitizer strips from message items).
-    assert seen_payload["instructions"] == "follow the directive"
+    # The plain developer message stays in input, and the typed directive is
+    # forwarded upstream byte-identical (including keys the interleaved-reasoning
+    # sanitizer strips from message items).
+    assert seen_payload["instructions"] == ""
     assert seen_payload["input"] == [
         developer_directive,
+        {"type": "message", "role": "developer", "content": "follow the directive"},
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
 
 
 @pytest.mark.asyncio
 async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+    import socket
+
+    import app.modules.accounts.auth_manager as auth_manager_module
+    from app.core.auth.refresh import RefreshError, TokenRefreshResult
+
+    network_attempts: list[str] = []
+
+    def deny_network(*args, **kwargs):
+        del args, kwargs
+        network_attempts.append("unexpected network I/O")
+        raise AssertionError("This in-process ASGI fixture must not use the network")
+
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
+    monkeypatch.setattr(socket.socket, "sendto", deny_network)
+    # Prove DNS and direct-connect denial without attempting actual egress.
+    with pytest.raises(AssertionError, match="must not use the network"):
+        socket.getaddrinfo("auth.openai.com", 443)
+    with socket.socket() as client:
+        with pytest.raises(AssertionError, match="must not use the network"):
+            client.connect(("192.0.2.1", 443))
+    assert len(network_attempts) == 2
+    network_attempts.clear()
+
+    refresh_account_ids: dict[str, str] = {}
     for raw_account_id, email in (
         ("acc_stream_invalidated_a", "stream-invalidated-a@example.com"),
         ("acc_stream_invalidated_b", "stream-invalidated-b@example.com"),
     ):
         auth_json = _make_auth_json(raw_account_id, email)
+        refresh_token = f"refresh-token-{raw_account_id}"
+        auth_json["tokens"]["refreshToken"] = refresh_token
+        refresh_account_ids[refresh_token] = raw_account_id
         files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
         response = await async_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
 
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
+    refreshed_account_ids: list[str] = []
+
+    async def fake_refresh(refresh_token: str, **kwargs: object) -> TokenRefreshResult:
+        assert kwargs == {"route": None, "allow_direct_egress": True}
+        account_id = refresh_account_ids[refresh_token]
+        assert captured_account_ids == [account_id]
+        assert account_id == invalidated_account_id
+        refreshed_account_ids.append(account_id)
+        # The original assertions require the second stream to use a different
+        # account. A successful refresh would retry the rejected account first.
+        raise RefreshError("refresh_token_reused", "refresh token reused", True)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del payload, headers, access_token, base_url, raise_for_status, kwargs
@@ -650,6 +874,7 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
 
     async with async_client.stream(
         "POST",
@@ -664,6 +889,10 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
     assert captured_account_ids[1] != invalidated_account_id
+    assert len(captured_account_ids) == 2
+    assert set(captured_account_ids) == set(refresh_account_ids.values())
+    assert refreshed_account_ids == [invalidated_account_id]
+    assert network_attempts == []
 
 
 @pytest.mark.asyncio

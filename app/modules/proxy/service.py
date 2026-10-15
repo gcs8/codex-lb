@@ -81,9 +81,7 @@ from app.core.clients.proxy import stream_responses as core_stream_responses  # 
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocket as UpstreamWebSocket
-from app.core.clients.proxy_websocket import (
-    connect_live_websocket as connect_live_websocket,
-)
+from app.core.clients.proxy_websocket import connect_live_websocket as connect_live_websocket
 from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
@@ -695,6 +693,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _serialize_websocket_error_event,  # noqa: F401
     _trim_websocket_previous_response_input_items,  # noqa: F401
     _upstream_websocket_disconnect_message,  # noqa: F401
+    _upstream_websocket_payload_too_large_message,  # noqa: F401
     _websocket_auth_failure_permanent_code,  # noqa: F401
     _websocket_auth_failure_requires_reauth,  # noqa: F401
     _websocket_auth_request_can_switch_account,  # noqa: F401

@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -5483,7 +5485,10 @@ including a `response.failed` payload that carries `response.id` even when
 `response.created` was not observed or an `error` payload with top-level
 `response_id`, a nonterminal `response.*`
 event, downstream sequence/output, another pending request on the shared
-socket, or an earlier replay. If no compatible replacement is available, or
+socket, or an earlier replay other than a completed pre-created WebSocket auth
+refresh on the rejecting account. That auth refresh MUST NOT consume the one account/model rejection
+move; a request MUST NOT make a second account/model rejection move even if it
+later refreshes another account. If no compatible replacement is available, or
 the request is account-bound, the proxy MUST preserve the original upstream
 400 error instead of replacing it with `no_accounts`, `stream_incomplete`, or
 another proxy-generated failure.
@@ -5527,8 +5532,21 @@ another proxy-generated failure.
 
 #### Scenario: accepted or visible request is never replayed
 
-- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay
+- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay other than a completed pre-created WebSocket auth refresh on the rejecting account
 - **THEN** the proxy does not transparently replay the request on another account
+
+#### Scenario: completed WebSocket auth refresh preserves the model move
+
+- **GIVEN** a movable pre-created WebSocket request has refreshed account A and replayed there after an auth failure
+- **WHEN** A rejects the model before accepting the response
+- **THEN** the proxy may move the request once to an eligible account B
+- **AND** a further account/model rejection cannot trigger another move
+
+#### Scenario: reauthentication without refresh does not replenish the model move
+
+- **GIVEN** account A fails authentication and the proxy moves a pre-created WebSocket request to B without completing a forced refresh
+- **WHEN** B rejects the requested model before acceptance
+- **THEN** the proxy does not move the request to a third account
 
 #### Scenario: account-bound request is never migrated
 
@@ -10896,3 +10914,71 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Durable same-owner context proof accepts agent-message follow-ups
+
+For a prefix-verified durable HTTP bridge full resend, the service SHALL accept
+well-formed `agent_message` items as fresh same-owner input after retained
+completed assistant output, or after a complete direct tool-call/output suffix
+that exactly settles the durable prior-response manifest. Agent messages MUST
+NOT substitute for missing prior output, missing tool calls, or missing tool
+outputs. Unknown or malformed agent-message shapes MUST NOT authorize replay.
+
+The fresh bridge and bounded explicit stale-anchor recovery paths SHALL retain
+the original input items and their order, including reasoning and encrypted
+agent-message content, while omitting the stale `previous_response_id`.
+The request MUST remain pinned to the proven durable account and MUST fail
+closed if that account is unavailable. This proof MUST NOT make an agent-message
+payload eligible for account-neutral replay or relax existing operation fences,
+replay limits, or the ban on replay after visible response output.
+
+#### Scenario: Subagent message follows a settled tool loop on a replacement socket
+- **GIVEN** the full input matches the durable stored prefix and settles every call in its manifest
+- **AND** a new agent message follows those tool outputs
+- **WHEN** the client resumes on a fresh HTTP bridge
+- **THEN** the original full input is sent to the durable owner without a previous-response anchor
+- **AND** encrypted content and item identifiers are preserved
+
+#### Scenario: Same owner explicitly rejects the anchor
+- **GIVEN** a prefix-verified full resend containing a valid agent follow-up
+- **WHEN** upstream rejects its anchor before any response output
+- **THEN** the existing fenced one-shot replacement sends the original full input without the rejected anchor to the same owner
+
+#### Scenario: Agent message cannot cover incomplete history
+- **GIVEN** a resend omits a manifest call or its output, lacks a known manifest and retained assistant output, or contains a malformed agent message
+- **WHEN** the bridge verifies same-owner context
+- **THEN** the agent message does not authorize unanchored replay
+
+#### Scenario: Unavailable owner cannot move encrypted agent context
+- **GIVEN** a full resend passes the same-owner proof and contains an agent message
+- **WHEN** its durable owner is unavailable
+- **THEN** no alternate account receives the request
+
+### Requirement: Owner-forward HTTP streams preserve SSE event boundaries
+
+The owner-forward HTTP receiver MUST dispatch each complete SSE event delimited
+by two consecutive CR, LF, or CRLF line endings, including mixed endings,
+without waiting for connection close. Chunk boundaries MUST NOT change payload
+text or cause a CRLF continuation byte to become part of the next event. Invalid
+UTF-8 bytes in complete events or the final unterminated block MUST decode with
+replacement characters instead of aborting the relay. Valid UTF-8 characters
+split across chunks MUST remain intact. Existing idle and request-budget timeout
+classification MUST remain unchanged.
+
+#### Scenario: Non-LF framing streams incrementally
+
+- **WHEN** an owner forwards multiple events separated by CRLF, CR, or mixed CR/LF blank lines
+- **THEN** the origin dispatches each event before EOF
+- **AND** the final `response.completed` remains separately parseable
+
+#### Scenario: Chunk boundaries preserve text and event identity
+
+- **WHEN** network chunks split a multi-byte UTF-8 character or a CRLF separator
+- **THEN** decoded payload text remains intact
+- **AND** the next event has no residual separator byte prefixed to its fields
+
+#### Scenario: Malformed UTF-8 is replaced
+
+- **WHEN** an event or the final unterminated block contains invalid UTF-8
+- **THEN** the receiver replaces the invalid bytes with U+FFFD
+- **AND** continues delivering subsequent events when present
