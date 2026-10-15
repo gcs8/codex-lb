@@ -150,29 +150,15 @@ async def exchange_authorization_code(
             logger.warning("OAuth token request failed request_id=%s status=%s", get_request_id(), status)
             raise _oauth_error_from_payload(payload, status)
         return _parse_tokens(payload)
-    async with lease_http_session(session) as client_session:
-        async with client_session.post(
-            url,
-            data=encoded,
-            headers=headers,
-            timeout=timeout,
-        ) as resp:
-            data = await _safe_json(resp)
-            try:
-                payload = OAuthTokenPayload.model_validate(data)
-            except ValidationError as exc:
-                logger.warning(
-                    "OAuth token response invalid request_id=%s",
-                    get_request_id(),
-                )
-                raise OAuthError("invalid_response", "OAuth response invalid") from exc
-            if resp.status >= 400:
-                logger.warning(
-                    "OAuth token request failed request_id=%s status=%s",
-                    get_request_id(),
-                    resp.status,
-                )
-                raise _oauth_error_from_payload(payload, resp.status)
+    status, data = await _direct_post_json(url, session=session, data=encoded, headers=headers, timeout=timeout)
+    try:
+        payload = OAuthTokenPayload.model_validate(data)
+    except ValidationError as exc:
+        logger.warning("OAuth token response invalid request_id=%s", get_request_id())
+        raise OAuthError("invalid_response", "OAuth response invalid") from exc
+    if status >= 400:
+        logger.warning("OAuth token request failed request_id=%s status=%s", get_request_id(), status)
+        raise _oauth_error_from_payload(payload, status)
 
     return _parse_tokens(payload)
 
@@ -228,30 +214,20 @@ async def request_device_code(
             raise OAuthError("device_auth_failed", f"Device code request failed with status {status}", status)
         payload_data = _validate_device_code_payload(data)
     else:
-        async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-                data = await _safe_json(resp)
-                if resp.status >= 400:
-                    if resp.status == 404:
-                        raise OAuthError(
-                            "device_auth_unavailable",
-                            (
-                                "Device code login is not enabled for this Codex server. "
-                                "Use the browser login or verify the server URL."
-                            ),
-                            resp.status,
-                        )
-                    logger.warning(
-                        "Device auth request failed request_id=%s status=%s",
-                        get_request_id(),
-                        resp.status,
-                    )
-                    raise OAuthError(
-                        "device_auth_failed",
-                        f"Device code request failed with status {resp.status}",
-                        resp.status,
-                    )
-                payload_data = _validate_device_code_payload(data)
+        status, data = await _direct_post_json(url, session=session, json=payload, headers=headers, timeout=timeout)
+        if status >= 400:
+            if status == 404:
+                raise OAuthError(
+                    "device_auth_unavailable",
+                    (
+                        "Device code login is not enabled for this Codex server. "
+                        "Use the browser login or verify the server URL."
+                    ),
+                    status,
+                )
+            logger.warning("Device auth request failed request_id=%s status=%s", get_request_id(), status)
+            raise OAuthError("device_auth_failed", f"Device code request failed with status {status}", status)
+        payload_data = _validate_device_code_payload(data)
     verification_url = f"{auth_base}/codex/device"
     user_code = payload_data.user_code
     device_auth_id = payload_data.device_auth_id
@@ -369,6 +345,24 @@ def _parse_tokens(payload: OAuthTokenPayload) -> OAuthTokens:
         refresh_token=payload.refresh_token,
         id_token=payload.id_token,
     )
+
+
+async def _direct_post_json(
+    url: str, *, session: aiohttp.ClientSession | None, **kwargs: Any
+) -> tuple[int, JsonObject]:
+    async with lease_http_session(session) as client_session:
+        try:
+            async with client_session.post(url, **kwargs) as response:
+                return response.status, await _safe_json(response)
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError):
+            # Do not replay a single-use code, or expose a credential-bearing
+            # exception/URL. Cancellation and non-transport failures propagate.
+            raise OAuthError(
+                "transport_error",
+                "Unable to reach the OAuth provider. "
+                "Check outbound connectivity and proxy settings, then restart login.",
+                status_code=502,
+            ) from None
 
 
 async def _codex_post(
