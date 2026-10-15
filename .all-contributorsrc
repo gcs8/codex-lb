@@ -1573,6 +1573,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "627444640",
+      "name": "Vaughn",
+      "avatar_url": "https://avatars.githubusercontent.com/u/59245770?v=4",
+      "profile": "https://github.com/627444640",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
