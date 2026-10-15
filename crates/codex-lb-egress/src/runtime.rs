@@ -21,6 +21,7 @@ enum ActiveRequest {
     Http(oneshot::Sender<()>),
     WebSocket {
         commands: mpsc::Sender<WebSocketCommand>,
+        consumed: mpsc::Sender<()>,
         abort: AbortHandle,
     },
 }
@@ -188,6 +189,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         }
                         let request_id = request.request_id.clone();
                         let (command_tx, command_rx) = mpsc::channel(32);
+                        let (consumed_tx, consumed_rx) = mpsc::channel(64);
                         let (start_tx, start_rx) = oneshot::channel();
                         let task_output = output.clone();
                         let task_active = active.clone();
@@ -195,7 +197,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let abort = tasks.spawn(async move {
                             let _ = start_rx.await;
                             if let Err(error) =
-                                execute_websocket(request, command_rx, &task_output).await
+                                execute_websocket(request, command_rx, consumed_rx, &task_output).await
                             {
                                 let _ = emit_websocket_error(
                                     &task_output,
@@ -211,6 +213,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             request_id.clone(),
                             ActiveRequest::WebSocket {
                                 commands: command_tx,
+                                consumed: consumed_tx,
                                 abort,
                             },
                         );
@@ -281,6 +284,24 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             },
                         )
                         .await?;
+                    }
+                    NativeCommand::WebsocketConsumed { request_id } => {
+                        // Receipts never wait on the writer command queue or stdin.
+                        let sender = {
+                            let active = active.lock().await;
+                            match active.get(&request_id) {
+                                Some(ActiveRequest::WebSocket { consumed, .. }) => Some(consumed.clone()),
+                                _ => None,
+                            }
+                        };
+                        if let Some(sender) = sender
+                            && let Err(mpsc::error::TrySendError::Full(_)) = sender.try_send(()) {
+                                if let Some(ActiveRequest::WebSocket { abort, .. }) = active.lock().await.remove(&request_id) {
+                                    abort.abort();
+                                }
+                                emit_websocket_setup_error(&output, &request_id, None,
+                                    "native websocket receive window violated").await?;
+                        }
                     }
                     NativeCommand::Cancel { request_id } => {
                         let cancellation = active.lock().await.remove(&request_id);
@@ -542,6 +563,7 @@ mod tests {
             ping_timeout_ms: Some(120_000),
             proxy_url: None,
             interpret_responses: false,
+            receive_backpressure: false,
         };
         let (mut websocket, response) = connect_native_websocket(&request)
             .await
