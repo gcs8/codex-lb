@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,8 +55,6 @@ pub(crate) enum NativeWebSocketFailure {
     WebSocket(WebSocketError),
     Timeout,
     LivenessTimeout,
-    ConsumerBackpressure,
-    ReceiveWindow,
     Output(std::io::Error),
 }
 
@@ -68,12 +65,6 @@ impl std::fmt::Display for NativeWebSocketFailure {
             Self::WebSocket(error) => write!(formatter, "{error}"),
             Self::Timeout => formatter.write_str("websocket connect timed out"),
             Self::LivenessTimeout => formatter.write_str("websocket pong timed out"),
-            Self::ConsumerBackpressure => {
-                formatter.write_str("websocket retained payload exceeds 32 MiB")
-            }
-            Self::ReceiveWindow => {
-                formatter.write_str("websocket receive receipt has no matching data")
-            }
             Self::Output(error) => write!(formatter, "{error}"),
         }
     }
@@ -93,83 +84,9 @@ impl From<std::io::Error> for NativeWebSocketFailure {
     }
 }
 
-// Receive receipts release both a Python slot and its retained byte charge.
-// The native pending queue applies TCP backpressure without blocking commands.
-const RECEIVE_WINDOW: usize = 64;
-const RECEIVE_BYTES: usize = 32 * 1024 * 1024;
-
-#[derive(Default)]
-struct ReceiveWindow {
-    pending: VecDeque<(NativeEvent, usize)>,
-    in_flight: VecDeque<usize>,
-    retained_bytes: usize,
-}
-
-impl ReceiveWindow {
-    fn push(&mut self, event: NativeEvent) -> Result<(), NativeWebSocketFailure> {
-        let charge = payload_charge(&event);
-        if charge > RECEIVE_BYTES.saturating_sub(self.retained_bytes) {
-            return Err(NativeWebSocketFailure::ConsumerBackpressure);
-        }
-        self.retained_bytes += charge;
-        self.pending.push_back((event, charge));
-        Ok(())
-    }
-
-    fn consumed(&mut self) -> Result<(), NativeWebSocketFailure> {
-        let charge = self
-            .in_flight
-            .pop_front()
-            .ok_or(NativeWebSocketFailure::ReceiveWindow)?;
-        self.retained_bytes -= charge;
-        Ok(())
-    }
-}
-
-fn payload_charge(event: &NativeEvent) -> usize {
-    match event {
-        NativeEvent::WebsocketText { text, .. } => text.len(),
-        NativeEvent::WebsocketResponsesText {
-            text,
-            payload,
-            event_type,
-            payload_response_id,
-            sequence_number,
-            ..
-        } => {
-            text.len()
-                + payload.get().len()
-                + event_type.as_ref().map_or(0, String::len)
-                + payload_response_id.as_ref().map_or(0, String::len)
-                + sequence_number
-                    .as_ref()
-                    .map_or(0, |value| value.get().len())
-        }
-        NativeEvent::WebsocketBinary { data, .. } => {
-            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
-            data.len() + (data.len() / 4 * 3).saturating_sub(padding)
-        }
-        _ => 0,
-    }
-}
-
-async fn deliver_or_queue(
-    output: &Output,
-    event: NativeEvent,
-    enabled: bool,
-    window: &mut ReceiveWindow,
-) -> Result<(), NativeWebSocketFailure> {
-    if enabled {
-        window.push(event)
-    } else {
-        emit(output, &event).await.map_err(Into::into)
-    }
-}
-
 pub(crate) async fn execute_websocket(
     request: NativeWebSocketRequest,
     mut commands: mpsc::Receiver<WebSocketCommand>,
-    mut consumed: mpsc::Receiver<()>,
     output: &Output,
 ) -> Result<(), NativeWebSocketFailure> {
     let request_id = request.request_id.clone();
@@ -178,8 +95,7 @@ pub(crate) async fn execute_websocket(
         .await
         .map_err(|_| NativeWebSocketFailure::Timeout)?
         .map_err(NativeWebSocketFailure::Connect)?;
-    let (websocket, response) = connected;
-    let mut websocket = Some(websocket);
+    let (mut websocket, response) = connected;
     let response_headers = websocket_headers(response.headers());
     emit(
         output,
@@ -198,78 +114,28 @@ pub(crate) async fn execute_websocket(
     let mut pong_deadline = Box::pin(tokio::time::sleep(dormant_timer));
     let mut ping_sequence = 0_u64;
     let mut awaiting_pong = None;
-    let enabled = request.receive_backpressure;
-    let mut window = ReceiveWindow::default();
-    let mut source_closed = false;
 
     loop {
         tokio::select! {
-            receipt = consumed.recv(), if enabled => {
-                if receipt.is_none() {
-                    return Ok(());
-                }
-                window.consumed()?;
-            }
-            _ = std::future::ready(()), if enabled && !window.pending.is_empty() && window.in_flight.len() < RECEIVE_WINDOW => {
-                let (event, charge) = window.pending.pop_front().expect("guarded pending data");
-                let terminal = matches!(event, NativeEvent::WebsocketClose { .. });
-                emit(output, &event).await?;
-                if terminal {
-                    return Ok(());
-                }
-                window.in_flight.push_back(charge);
-            }
-            _ = &mut next_ping, if !source_closed && ping_interval.is_some() => {
+            _ = &mut next_ping, if ping_interval.is_some() => {
                 let interval = ping_interval.expect("guarded ping interval");
                 next_ping.as_mut().reset(tokio::time::Instant::now() + interval);
                 if awaiting_pong.is_none() {
                     ping_sequence = ping_sequence.wrapping_add(1);
                     let payload = Bytes::copy_from_slice(&ping_sequence.to_be_bytes());
-                    websocket.as_mut().expect("open transport").send(Message::Ping(payload.clone())).await?;
+                    websocket.send(Message::Ping(payload.clone())).await?;
                     if let Some(timeout) = ping_timeout {
                         awaiting_pong = Some(payload);
                         pong_deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
                     }
                 }
             }
-            _ = &mut pong_deadline, if !source_closed && awaiting_pong.is_some() => {
+            _ = &mut pong_deadline, if awaiting_pong.is_some() => {
                 return Err(NativeWebSocketFailure::LivenessTimeout);
             }
             command = commands.recv() => {
                 let Some(command) = command else {
                     return Ok(());
-                };
-                let Some(websocket) = websocket.as_mut() else {
-                    match command {
-                        WebSocketCommand::Send { command_id, .. } => {
-                            // The transport is gone, but the ordered receive
-                            // window still owns data and its terminal event.
-                            emit(output, &NativeEvent::WebsocketError {
-                                request_id: request_id.clone(),
-                                command_id: Some(command_id),
-                                message: "native websocket is closed".to_owned(),
-                                failure_phase: "websocket_send".to_owned(),
-                                retryable_same_contract: false,
-                                is_tls_verification_failure: false,
-                                status: None,
-                                headers: Vec::new(),
-                                body: None,
-                            }).await?;
-                        }
-                        WebSocketCommand::Close { command_id, code, reason } => {
-                            // Explicit local close may retire unread data, as
-                            // before; it never waits for application receipts.
-                            emit(output, &NativeEvent::WebsocketSent {
-                                request_id: request_id.clone(), command_id,
-                            }).await?;
-                            emit(output, &NativeEvent::WebsocketClose {
-                                request_id: request_id.clone(), code: Some(code),
-                                reason: (!reason.is_empty()).then_some(reason),
-                            }).await?;
-                            return Ok(());
-                        }
-                    }
-                    continue;
                 };
                 match command {
                     WebSocketCommand::Send { command_id, message } => {
@@ -331,7 +197,7 @@ pub(crate) async fn execute_websocket(
                     }
                 }
             }
-            incoming = async { websocket.as_mut().expect("open transport").next().await }, if !source_closed && (!enabled || window.pending.len() < RECEIVE_WINDOW) => {
+            incoming = websocket.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         let text = text.to_string();
@@ -340,9 +206,9 @@ pub(crate) async fn execute_websocket(
                             .then(|| interpret_websocket(&text))
                             .flatten();
                         if let Some(event) = event {
-                            deliver_or_queue(
+                            emit(
                                 output,
-                                NativeEvent::WebsocketResponsesText {
+                                &NativeEvent::WebsocketResponsesText {
                                     request_id: request_id.clone(),
                                     text,
                                     event_type: event.event_type,
@@ -350,33 +216,30 @@ pub(crate) async fn execute_websocket(
                                     payload_response_id: event.payload_response_id,
                                     sequence_number: event.sequence_number,
                                 },
-                                enabled, &mut window,
                             )
                             .await?;
                         } else {
-                            deliver_or_queue(
+                            emit(
                                 output,
-                                NativeEvent::WebsocketText {
+                                &NativeEvent::WebsocketText {
                                     request_id: request_id.clone(),
                                     text,
                                 },
-                                enabled, &mut window,
                             )
                             .await?;
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        deliver_or_queue(
+                        emit(
                             output,
-                            NativeEvent::WebsocketBinary {
+                            &NativeEvent::WebsocketBinary {
                                 request_id: request_id.clone(),
                                 data: base64::engine::general_purpose::STANDARD.encode(data),
                             },
-                            enabled, &mut window,
                         ).await?;
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        if let Err(error) = websocket.as_mut().expect("open transport").send(Message::Pong(payload)).await {
+                        if let Err(error) = websocket.send(Message::Pong(payload)).await {
                             return Err(error.into());
                         }
                     }
@@ -386,12 +249,6 @@ pub(crate) async fn execute_websocket(
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
-                        // Pinned tungstenite queues the close reply on read;
-                        // tokio-tungstenite flush writes it but does not shut
-                        // down TCP. Release the flushed transport now, not when
-                        // application credits finally drain the receive window.
-                        websocket.as_mut().expect("open transport").flush().await?;
-                        drop(websocket.take());
                         let (code, reason) = frame
                             .map(|frame| {
                                 (
@@ -400,29 +257,24 @@ pub(crate) async fn execute_websocket(
                                 )
                             })
                             .unwrap_or((None, None));
-                        deliver_or_queue(
+                        emit(
                             output,
-                            NativeEvent::WebsocketClose { request_id: request_id.clone(), code, reason },
-                            enabled, &mut window,
+                            &NativeEvent::WebsocketClose { request_id, code, reason },
                         ).await?;
-                        if !enabled { return Ok(()); }
-                        source_closed = true;
+                        return Ok(());
                     }
                     Some(Ok(Message::Frame(_))) => {}
                     Some(Err(error)) => return Err(error.into()),
                     None => {
-                        drop(websocket.take());
-                        deliver_or_queue(
+                        emit(
                             output,
-                            NativeEvent::WebsocketClose {
-                                request_id: request_id.clone(),
+                            &NativeEvent::WebsocketClose {
+                                request_id,
                                 code: None,
                                 reason: None,
                             },
-                            enabled, &mut window,
                         ).await?;
-                        if !enabled { return Ok(()); }
-                        source_closed = true;
+                        return Ok(());
                     }
                 }
             }
@@ -597,24 +449,6 @@ pub(crate) async fn emit_websocket_error(
     failure: &NativeWebSocketFailure,
 ) -> Result<(), std::io::Error> {
     let (message, phase, retryable, tls_verification, status, headers, body) = match failure {
-        NativeWebSocketFailure::ConsumerBackpressure => (
-            "native websocket retained payload exceeds 32 MiB",
-            "consumer_backpressure",
-            false,
-            false,
-            None,
-            Vec::new(),
-            None,
-        ),
-        NativeWebSocketFailure::ReceiveWindow => (
-            "native websocket receive receipt has no matching data",
-            "protocol",
-            false,
-            false,
-            None,
-            Vec::new(),
-            None,
-        ),
         NativeWebSocketFailure::Timeout => (
             "native websocket connection timed out",
             "connect",
@@ -724,75 +558,5 @@ fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool 
             error_chain_has_invalid_certificate(error)
         }
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod receive_tests {
-    use super::*;
-
-    #[test]
-    fn receipts_release_exactly_one_fifo_charge() {
-        let mut window = ReceiveWindow::default();
-        assert!(matches!(
-            window.consumed(),
-            Err(NativeWebSocketFailure::ReceiveWindow)
-        ));
-        for text in ["é", "abc"] {
-            window
-                .push(NativeEvent::WebsocketText {
-                    request_id: "test".into(),
-                    text: text.into(),
-                })
-                .unwrap();
-        }
-        assert_eq!(window.retained_bytes, 5);
-        while let Some((_, charge)) = window.pending.pop_front() {
-            window.in_flight.push_back(charge);
-        }
-        window.consumed().unwrap();
-        assert_eq!(window.retained_bytes, 3);
-        window.consumed().unwrap();
-        assert_eq!(window.retained_bytes, 0);
-        assert!(matches!(
-            window.consumed(),
-            Err(NativeWebSocketFailure::ReceiveWindow)
-        ));
-    }
-
-    #[test]
-    fn byte_budget_accepts_exact_edge_and_rejects_one_more_byte() {
-        let mut window = ReceiveWindow::default();
-        for _ in 0..2 {
-            window
-                .push(NativeEvent::WebsocketText {
-                    request_id: "test".into(),
-                    text: "x".repeat(RECEIVE_BYTES / 2),
-                })
-                .unwrap();
-        }
-        assert_eq!(window.retained_bytes, RECEIVE_BYTES);
-        assert!(matches!(
-            window.push(NativeEvent::WebsocketText {
-                request_id: "test".into(),
-                text: "x".into(),
-            }),
-            Err(NativeWebSocketFailure::ConsumerBackpressure)
-        ));
-        assert_eq!(window.pending.len(), 2);
-        assert_eq!(window.retained_bytes, RECEIVE_BYTES);
-    }
-
-    #[test]
-    fn binary_charge_includes_encoded_and_decoded_bytes() {
-        for (data, charge) in [("YQ==", 5), ("YWI=", 6), ("YWJj", 7)] {
-            assert_eq!(
-                payload_charge(&NativeEvent::WebsocketBinary {
-                    request_id: "test".into(),
-                    data: data.into(),
-                }),
-                charge
-            );
-        }
     }
 }

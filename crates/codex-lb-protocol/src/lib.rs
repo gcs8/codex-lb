@@ -19,7 +19,6 @@ pub const CAPABILITIES: &[&str] = &[
     "websocket_responses_events_v1",
     "websocket_responses_routing_v1",
     "websocket_send_ack",
-    "websocket_receive_window_v1",
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -46,9 +45,6 @@ pub enum NativeCommand {
         command_id: String,
         code: u16,
         reason: String,
-    },
-    WebsocketConsumed {
-        request_id: String,
     },
     Cancel {
         request_id: String,
@@ -93,8 +89,6 @@ pub struct NativeWebSocketRequest {
     pub proxy_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub interpret_responses: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub receive_backpressure: bool,
 }
 
 fn is_false(value: &bool) -> bool {
