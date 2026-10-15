@@ -857,6 +857,31 @@ class _StreamingRetryMixin:
                 return settled
             return True
 
+        async def _write_post_terminal_health(
+            account: Account,
+            error: UpstreamError,
+            code: str,
+            *,
+            http_status: int | None = None,
+            upstream_http_status: int | None = None,
+        ) -> None:
+            try:
+                if upstream_http_status is not None:
+                    await proxy._handle_stream_error(
+                        account, error, code, http_status=http_status, upstream_http_status=upstream_http_status
+                    )
+                elif http_status is None:
+                    await proxy._handle_stream_error(account, error, code)
+                else:
+                    await proxy._handle_stream_error(account, error, code, http_status=http_status)
+            except Exception:
+                logger.warning(
+                    "Failed to write post-terminal stream health account_id=%s request_id=%s",
+                    account.id,
+                    request_id,
+                    exc_info=True,
+                )
+
         async def _finalize_terminal_settlement_after_downstream_close(
             current_settlement: _StreamSettlement,
             account: Account,
@@ -884,7 +909,7 @@ class _StreamingRetryMixin:
                 if not settled:
                     return
                 if current_settlement.account_health_error:
-                    await proxy._handle_stream_error(
+                    await _write_post_terminal_health(
                         account,
                         _stream_settlement_error_payload(current_settlement),
                         current_settlement.error_code or "upstream_error",
@@ -2507,7 +2532,7 @@ class _StreamingRetryMixin:
                                         raise
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
-                                    await proxy._handle_stream_error(
+                                    await _write_post_terminal_health(
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
@@ -2913,7 +2938,7 @@ class _StreamingRetryMixin:
                         else:
                             settled = await _settle_stream_usage_before_pending_penalty(settlement)
                             if settled and settlement.account_health_error:
-                                await proxy._handle_stream_error(
+                                await _write_post_terminal_health(
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
@@ -2996,7 +3021,7 @@ class _StreamingRetryMixin:
                     else:
                         health_write_allowed = await _settle_stream_usage_before_pending_penalty(settlement)
                         if health_write_allowed and settlement.account_health_error:
-                            await proxy._handle_stream_error(
+                            await _write_post_terminal_health(
                                 account,
                                 _stream_settlement_error_payload(settlement),
                                 settlement.error_code or "upstream_error",
@@ -3339,7 +3364,7 @@ class _StreamingRetryMixin:
                                 )
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
-                                    await proxy._handle_stream_error(
+                                    await _write_post_terminal_health(
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
@@ -3602,7 +3627,7 @@ class _StreamingRetryMixin:
                                 and settlement.account_health_error
                                 and not current_account_penalty_queued
                             ):
-                                await proxy._handle_stream_error(
+                                await _write_post_terminal_health(
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
