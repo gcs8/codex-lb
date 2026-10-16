@@ -153,3 +153,18 @@ def test_release_guards_revalidate_pr_metadata_edits_in_their_own_workflow() -> 
     assert "python -m scripts.guard_beta_release" in beta_job
     assert "name: Stable release guard" in stable_job
     assert "python -m scripts.guard_stable_release" in stable_job
+
+
+def test_integration_core_shards_build_and_export_the_native_helper() -> None:
+    """issue-1304 wire regressions in integration-core assert the helper exists."""
+    workflow = _ci_workflow_text()
+    shard_job = _job_block(workflow, "test-integration-core")
+
+    build = "cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress"
+    run = "make test-integration-core-${{ matrix.shard }}"
+    assert build in shard_job
+    assert run in shard_job
+    assert shard_job.index(build) < shard_job.index(run)
+    assert (
+        "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"
+    ) in shard_job
