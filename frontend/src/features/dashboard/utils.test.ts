@@ -8,6 +8,7 @@ import {
   buildDepletionView,
   buildRemainingItems,
   buildWeeklyCreditPace,
+  formatBurnHours,
   sumRemaining,
   weeklyCreditPaceStatus,
   type RemainingItem,
@@ -1227,6 +1228,100 @@ describe("buildDashboardView", () => {
 
     // Quota-exceeded counts as a fully used weekly window regardless of the sample.
     expect(burn.value).toBe("0.00× / 1.00×");
+  });
+
+  it("rounds 'runs out in' to whole hours before splitting off days (#29)", () => {
+    expect(formatBurnHours(47.6)).toBe("~2d 0h");
+    expect(formatBurnHours(23.5)).toBe("~1d 0h");
+    expect(formatBurnHours(23.4)).toBe("~23h");
+    expect(formatBurnHours(55.78)).toBe("~2d 8h");
+    expect(formatBurnHours(0.2)).toBe("~1h");
+    expect(formatBurnHours(0)).toBe("now");
+  });
+
+  it("names the 5h cutoff in the low-confidence note when the 5h projection is the headline (#29)", () => {
+    const now = Date.parse("2026-10-16T01:36:00Z");
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "plus",
+          email: "plus@example.com",
+          usage: { primaryRemainingPercent: 90, secondaryRemainingPercent: null },
+          // 30 minutes into the 5 h window: under the 5 h / 7 (about 43 min) cutoff.
+          resetAtPrimary: new Date(now + 4.5 * 3_600_000).toISOString(),
+          windowMinutesPrimary: 300,
+          windowMinutesSecondary: null,
+          capacityCreditsPrimary: 225,
+        }),
+      ],
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const burn = buildDashboardView(overview, createDefaultRequestLogs(), false).stats[3];
+      expect(burn.meta).toContain("low confidence (<43 min of data)");
+      expect(burn.meta).not.toContain("24h");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats an elapsed reset as a full window and does not extrapolate (#29)", () => {
+    const now = Date.parse("2026-10-16T01:36:00Z");
+    const overview = createDashboardOverview({
+      accounts: [
+        account({
+          accountId: "stale",
+          email: "stale@example.com",
+          usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 40 },
+          resetAtSecondary: new Date(now - 3_600_000).toISOString(),
+          windowMinutesPrimary: null,
+          windowMinutesSecondary: 10_080,
+          capacityCreditsSecondary: 8_820,
+        }),
+      ],
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const burn = buildDashboardView(overview, createDefaultRequestLogs(), false).stats[3];
+      // Hours until reset clamp to 0, so elapsed is the whole window: demand is
+      // the used share, nothing can run out before a reset that already passed,
+      // and a full window of data is not low confidence.
+      expect(burn.value).toBe("0.60×");
+      expect(burn.meta).toBe("5.29K of 8.82K credits by reset · no account runs out before reset");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves paused and deactivated accounts out of the pool burn projection (#31)", () => {
+    const weekly = (id: string, status: string, used: number, capacity: number) =>
+      account({
+        accountId: id,
+        email: `${id}@example.com`,
+        status,
+        usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 100 - used },
+        resetAtSecondary: null,
+        windowMinutesPrimary: null,
+        windowMinutesSecondary: 10_080,
+        capacityCreditsSecondary: capacity,
+      });
+    const overview = createDashboardOverview({
+      accounts: [
+        weekly("active", "active", 50, 8_820),
+        weekly("paused", "paused", 0, 35_280),
+        weekly("gone", "deactivated", 100, 8_820),
+      ],
+    });
+
+    const burn = buildDashboardView(overview, createDefaultRequestLogs(), false).stats[3];
+
+    // Only the active Pro Lite counts: 0.5 x 8,820 of 8,820. The paused Pro's
+    // 35,280 of idle capacity and the deactivated account's frozen 100 % are out.
+    expect(burn.label).toBe("Pool burn projection (7d)");
+    expect(burn.value).toBe("0.50×");
+    expect(burn.meta).toBe("4.41K of 8.82K credits by reset · no account runs out before reset");
   });
 
   it("shows only the averaged cost text on the estimated cost card", () => {

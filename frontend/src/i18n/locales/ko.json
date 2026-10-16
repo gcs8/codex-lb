@@ -834,7 +834,7 @@
   "dashboard.stats.poolBurnDemand": "리셋까지 {{pool}} 중 {{demand}} 크레딧",
   "dashboard.stats.poolBurnFirstExhaustion": "{{account}} {{when}} 후 소진",
   "dashboard.stats.poolBurnNoExhaustion": "리셋 전 소진되는 계정 없음",
-  "dashboard.stats.poolBurnLowConfidence": "신뢰도 낮음 (데이터 24시간 미만)",
+  "dashboard.stats.poolBurnLowConfidence": "신뢰도 낮음 (데이터 {{span}} 미만)",
   "dashboard.stats.avgPerDay": "일평균 {{value}}",
   "dashboard.stats.avgPerHour": "시간당 평균 {{value}}",
   "dashboard.stats.errorRate": "오류율 ({{timeframe}})",
