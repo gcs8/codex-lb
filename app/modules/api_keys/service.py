@@ -1414,7 +1414,7 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
-_VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage"}
+_VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage", "lb_summary"}
 _DEFAULT_USAGE_SECTIONS = "upstream_limits,account_pool_usage"
 
 
