@@ -984,6 +984,30 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_quota_tier(
+        self,
+        account_id: str,
+        multiplier: float | None,
+        expires_at: datetime | None,
+        monthly_credits: float | None = None,
+    ) -> Account | None:
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .where(Account.delete_requested_at.is_(None))
+                .values(
+                    quota_tier_multiplier=multiplier,
+                    quota_tier_multiplier_expires_at=expires_at,
+                    quota_monthly_credits=monthly_credits,
+                )
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            if result.scalar_one_or_none() is None:
+                return None
+        return await self._session.get(Account, account_id, populate_existing=True)
+
     async def update_routing_policy(self, account_id: str, routing_policy: str) -> bool:
         async with sqlite_writer_section():
             result = await self._session.execute(

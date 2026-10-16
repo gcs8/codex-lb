@@ -26,6 +26,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
+from app.core.usage import capacity_for_plan
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
@@ -5517,7 +5518,8 @@ def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():
         used_percent=0.0,
         secondary_used_percent=0.0,
         plan_type="plus",
-        capacity_credits=7560.0,
+        # Same plan-derived weekly capacity the education alias resolves to.
+        capacity_credits=capacity_for_plan("plus", "secondary"),
     )
 
     counts = {"education": 0, "plus": 0}

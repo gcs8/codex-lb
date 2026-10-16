@@ -300,7 +300,7 @@ def _build_account_history(
         remaining_percent = usage_core.remaining_percent_from_used(used_percent_value)
         if remaining_percent is None:
             remaining_percent = missing_remaining_percent
-        capacity = usage_core.capacity_for_plan(account.plan_type, window)
+        capacity = usage_core.capacity_for_account(account, window)
         remaining_credits = usage_core.remaining_credits_from_percent(used_percent_value, capacity)
         if remaining_credits is None and missing_remaining_percent is not None:
             remaining_credits = capacity

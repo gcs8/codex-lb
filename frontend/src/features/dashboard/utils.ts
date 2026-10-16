@@ -22,6 +22,7 @@ import {
   formatRate,
   formatWindowMinutes,
 } from "@/utils/formatters";
+import { PRO_WEEKLY_CAPACITY_CREDITS } from "@/features/dashboard/capacity";
 
 function t(key: string, options?: Record<string, unknown>): string {
   return i18n.t(key, options);
@@ -395,7 +396,6 @@ function formatBurnWindowLabel(windowKey: "primary" | "secondary", windowMinutes
 }
 
 const TREND_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#ef4444", "#f59e0b"];
-const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 function trendPointsToValues(points: TrendPoint[]): { value: number }[] {
   return points.map((p) => ({ value: p.v }));

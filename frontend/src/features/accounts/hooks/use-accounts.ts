@@ -19,6 +19,8 @@ import {
   setAccountAlias,
   updateAccount,
   updateAccountLimitWarmup,
+  type AccountQuotaTierOverride,
+  updateAccountQuotaTier,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
 import type {
@@ -201,6 +203,25 @@ export function useAccountMutations() {
     },
   });
 
+  const quotaTierMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      override,
+      expiresAt,
+    }: {
+      accountId: string;
+      override: AccountQuotaTierOverride;
+      expiresAt: string | null;
+    }) => updateAccountQuotaTier(accountId, override, expiresAt),
+    onSuccess: (_data, variables) => {
+      toast.success(t("accounts.toasts.quotaTierSet"));
+      void invalidateAccountRelatedQueries(queryClient, variables.accountId);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.quotaTierUpdateFailed"));
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -253,6 +274,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    quotaTierMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };

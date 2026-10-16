@@ -52,6 +52,7 @@ export function AccountsPage() {
     updateMutation,
     deleteMutation,
     routingPolicyMutation,
+    quotaTierMutation,
     exportAuthMutation,
   } = useAccounts();
   const { settingsQuery } = useSettings();
@@ -236,6 +237,9 @@ export function AccountsPage() {
                 accountId,
                 routingPolicy,
               })
+            }
+            onQuotaTierSave={(accountId, override, expiresAt) =>
+              quotaTierMutation.mutateAsync({ accountId, override, expiresAt })
             }
             onSecurityWorkAuthorizedChange={(accountId, enabled) =>
               void updateMutation.mutateAsync({

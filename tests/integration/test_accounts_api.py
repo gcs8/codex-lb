@@ -716,3 +716,135 @@ async def test_list_accounts_flags_email_duplicates(async_client):
     assert accounts_by_id["placeholder-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-a"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-b"]["isEmailDuplicate"] is False
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_override_round_trip(async_client):
+    """PUT /api/accounts/{id}/quota-tier sets the tier, capacity follows it, and null clears it."""
+    from datetime import timedelta, timezone
+
+    from app.core.usage import capacity_for_plan
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="acc_tier",
+                email="tier@example.com",
+                plan_type="pro",
+                access_token_encrypted=encryptor.encrypt("a"),
+                refresh_token_encrypted=encryptor.encrypt("r"),
+                id_token_encrypted=encryptor.encrypt("i"),
+                last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+    expires = (datetime.now(timezone.utc) + timedelta(days=14)).replace(microsecond=0)
+    response = await async_client.put(
+        "/api/accounts/acc_tier/quota-tier",
+        json={"quotaTierMultiplier": 20, "quotaTierMultiplierExpiresAt": expires.isoformat()},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["quotaTierMultiplier"] == 20
+    assert body["planQuotaTierMultiplier"] == 10
+    assert body["effectiveQuotaTierMultiplier"] == 20
+
+    accounts = (await async_client.get("/api/accounts")).json()["accounts"]
+    account = next(item for item in accounts if item["accountId"] == "acc_tier")
+    assert account["effectiveQuotaTierMultiplier"] == 20
+    pro_weekly = capacity_for_plan("pro", "secondary")
+    assert pro_weekly is not None
+    assert account["capacityCreditsSecondary"] == pytest.approx(2 * pro_weekly)
+    assert account["capacityCreditsSecondaryMonthlyEquivalent"] == pytest.approx(7560.0 * 20)
+
+    cleared = await async_client.put("/api/accounts/acc_tier/quota-tier", json={"quotaTierMultiplier": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["quotaTierMultiplier"] is None
+    assert cleared.json()["quotaTierMultiplierExpiresAt"] is None
+    assert cleared.json()["effectiveQuotaTierMultiplier"] == 10
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_override_validation(async_client):
+    from datetime import timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    missing = await async_client.put("/api/accounts/does-not-exist/quota-tier", json={"quotaTierMultiplier": 5})
+    assert missing.status_code == 404
+    too_big = await async_client.put("/api/accounts/does-not-exist/quota-tier", json={"quotaTierMultiplier": 1000})
+    assert too_big.status_code in (400, 422)
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="acc_tier_past",
+                email="tier-past@example.com",
+                plan_type="pro",
+                access_token_encrypted=encryptor.encrypt("a"),
+                refresh_token_encrypted=encryptor.encrypt("r"),
+                id_token_encrypted=encryptor.encrypt("i"),
+                last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+    expired = await async_client.put(
+        "/api/accounts/acc_tier_past/quota-tier", json={"quotaTierMultiplier": 20, "quotaTierMultiplierExpiresAt": past}
+    )
+    assert expired.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_raw_monthly_credits(async_client):
+    """The override can be given as raw monthly credits instead of a multiplier; not both."""
+    from datetime import timezone
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="acc_tier_credits",
+                email="tier-credits@example.com",
+                plan_type="prolite",
+                access_token_encrypted=encryptor.encrypt("a"),
+                refresh_token_encrypted=encryptor.encrypt("r"),
+                id_token_encrypted=encryptor.encrypt("i"),
+                last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+    both = await async_client.put(
+        "/api/accounts/acc_tier_credits/quota-tier", json={"quotaTierMultiplier": 5, "quotaMonthlyCredits": 40000}
+    )
+    assert both.status_code == 400
+
+    response = await async_client.put("/api/accounts/acc_tier_credits/quota-tier", json={"quotaMonthlyCredits": 45360})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["quotaTierMultiplier"] is None
+    assert body["quotaMonthlyCredits"] == 45360
+    assert body["effectiveQuotaTierMultiplier"] == pytest.approx(6.0)
+    assert body["effectiveQuotaMonthlyCredits"] == pytest.approx(45360)
+
+    accounts = (await async_client.get("/api/accounts")).json()["accounts"]
+    account = next(item for item in accounts if item["accountId"] == "acc_tier_credits")
+    assert account["capacityCreditsSecondary"] == pytest.approx(45360 * 7 / 30)
+    assert account["capacityCreditsSecondaryMonthlyEquivalent"] == pytest.approx(45360)
+
+    cleared = await async_client.put("/api/accounts/acc_tier_credits/quota-tier", json={"quotaMonthlyCredits": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["quotaMonthlyCredits"] is None
+    assert cleared.json()["effectiveQuotaTierMultiplier"] == 5
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_rejects_boolean_and_string_amounts(async_client):
+    """JSON true/"20" must not coerce into a tier (review on PR #8)."""
+    for body in ({"quotaTierMultiplier": True}, {"quotaMonthlyCredits": True}, {"quotaTierMultiplier": "20"}):
+        response = await async_client.put("/api/accounts/does-not-exist/quota-tier", json=body)
+        assert response.status_code in (400, 422), body

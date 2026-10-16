@@ -10,6 +10,8 @@ import {
   AccountLimitWarmupUpdateResponseSchema,
   AccountUpdateRequestSchema,
   AccountsResponseSchema,
+  AccountQuotaTierUpdateRequestSchema,
+  AccountQuotaTierUpdateResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
   AccountUsageResetConsumeRequestSchema,
@@ -98,6 +100,28 @@ export function updateAccountRoutingPolicy(
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
     AccountRoutingPolicyUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
+export type AccountQuotaTierOverride =
+  | { kind: "multiplier"; value: number }
+  | { kind: "monthlyCredits"; value: number }
+  | null;
+
+export function updateAccountQuotaTier(
+  accountId: string,
+  override: AccountQuotaTierOverride,
+  quotaTierMultiplierExpiresAt: string | null,
+) {
+  const payload = AccountQuotaTierUpdateRequestSchema.parse({
+    quotaTierMultiplier: override?.kind === "multiplier" ? override.value : null,
+    quotaMonthlyCredits: override?.kind === "monthlyCredits" ? override.value : null,
+    quotaTierMultiplierExpiresAt: override == null ? null : quotaTierMultiplierExpiresAt,
+  });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/quota-tier`,
+    AccountQuotaTierUpdateResponseSchema,
     { body: payload },
   );
 }

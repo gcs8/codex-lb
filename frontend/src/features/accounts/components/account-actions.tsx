@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { usePermission } from "@/features/auth/hooks/use-auth";
+import { AccountQuotaTier, type AccountQuotaTierSave } from "@/features/accounts/components/account-quota-tier";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
@@ -46,6 +47,7 @@ export type AccountActionsProps = {
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
   ) => void;
+  onQuotaTierSave?: AccountQuotaTierSave;
 };
 
 export function AccountActions({
@@ -63,6 +65,7 @@ export function AccountActions({
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
+  onQuotaTierSave,
 }: AccountActionsProps) {
   const { t } = useTranslation();
   // Credential export is its own permission (`accounts:export`), not part of account writes.
@@ -118,6 +121,10 @@ export function AccountActions({
             </SelectContent>
           </Select>
         </div>
+      ) : null}
+
+      {onQuotaTierSave ? (
+        <AccountQuotaTier account={account} disabled={busy || readOnly} onSave={onQuotaTierSave} />
       ) : null}
 
       <label

@@ -46,10 +46,37 @@ def test_capacity_for_plan():
     assert capacity_for_plan("plus", "5h") is not None
     assert capacity_for_plan("plus", "7d") is not None
     assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
-    assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
+    # Pro 100 monthly quota 37,800 (5x Plus 7,560) pro-rated to 7 days.
+    assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0 * 7 / 30)
     assert capacity_for_plan("self_serve_business_prolite", "5h") == pytest.approx(1125.0)
-    assert capacity_for_plan("self_serve_business_prolite", "7d") == pytest.approx(37800.0)
+    assert capacity_for_plan("self_serve_business_prolite", "7d") == pytest.approx(37800.0 * 7 / 30)
     assert capacity_for_plan("unknown", "5h") is None
+
+
+def test_weekly_capacity_is_monthly_quota_prorated_to_seven_days():
+    """Published quotas are monthly (Plus 7,560; Pro 100 5x; Pro 200 10x). The 7-day
+    window must be that quota x 7/30, not the monthly figure itself (gcs8/codex-lb#7)."""
+    from app.core.usage import (
+        PLAN_QUOTA_CREDITS_PER_MONTH,
+        monthly_credits_from_weekly,
+        weekly_credits_from_monthly,
+    )
+
+    assert PLAN_QUOTA_CREDITS_PER_MONTH["plus"] == pytest.approx(7560.0)
+    assert PLAN_QUOTA_CREDITS_PER_MONTH["prolite"] == pytest.approx(37800.0)
+    assert PLAN_QUOTA_CREDITS_PER_MONTH["pro"] == pytest.approx(75600.0)
+    assert capacity_for_plan("plus", "7d") == pytest.approx(1764.0)
+    assert capacity_for_plan("prolite", "7d") == pytest.approx(8820.0)
+    assert capacity_for_plan("pro", "7d") == pytest.approx(17640.0)
+    # Pro is 2x Pro Lite and 10x Plus.
+    pro, prolite, plus = (capacity_for_plan(plan, "7d") for plan in ("pro", "prolite", "plus"))
+    assert pro is not None and prolite is not None and plus is not None
+    assert pro == pytest.approx(2 * prolite)
+    assert pro == pytest.approx(10 * plus)
+    # Round trip used by the dashboard's monthly-equivalent display.
+    assert monthly_credits_from_weekly(weekly_credits_from_monthly(37800.0)) == pytest.approx(37800.0)
+    # Free keeps its observed weekly-only value.
+    assert capacity_for_plan("free", "7d") == pytest.approx(1134.0)
 
 
 def test_summarize_usage_window_includes_prolite_capacity():

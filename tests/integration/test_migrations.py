@@ -3405,7 +3405,11 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
     config = _build_alembic_config(probe_db_url)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [merge_revision]
+    # Single head, and it descends from the merge (later revisions, e.g. #7's tier
+    # override, may sit on top of it).
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert merge_revision in {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
     # Read the parents from the graph, not from a second literal pair: a rebase
     # onto a newer main re-chains ``down_revision``.
     parents = script.get_revision(merge_revision).down_revision
@@ -3438,7 +3442,7 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
         await to_thread.run_sync(lambda p=start_parent: run_upgrade(db_url, p, bootstrap_legacy=False))
         engine = create_async_engine(db_url, future=True)
         try:
-            first = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            first = await to_thread.run_sync(lambda: run_upgrade(db_url, merge_revision, bootstrap_legacy=False))
             assert first.current_revision == merge_revision
             at_head = await _schema_state(engine)
             assert "dashboard_scim_tokens" in at_head["tables"]
@@ -3461,7 +3465,7 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
             assert await _current_heads(engine) == {scim_revision, overflow_revision}
             assert await _schema_state(engine) == at_head
 
-            second = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            second = await to_thread.run_sync(lambda: run_upgrade(db_url, merge_revision, bootstrap_legacy=False))
             assert second.current_revision == merge_revision
             assert await _schema_state(engine) == converged_state
         finally:
@@ -3469,3 +3473,56 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
 
 
 # end scim/overflow merge lineage
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds two nullable columns without touching existing rows; downgrade
+    drops them; a half-applied schema upgrades idempotently; head stays single."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-tier.sqlite'}"
+    parent = "20260918_000000_merge_scim_and_overflow_heads"
+    revision = "20261015_000000_add_account_quota_tier_override"
+    names = {"quota_tier_multiplier", "quota_tier_multiplier_expires_at", "quota_monthly_credits"}
+
+    def _cols(sync_conn) -> dict[str, dict[str, object]]:
+        return {
+            c["name"]: {"nullable": c["nullable"], "type": str(c["type"]).upper()}
+            for c in sa_inspect(sync_conn).get_columns("accounts")
+            if c["name"] in names
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {}
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {
+                "quota_tier_multiplier": {"nullable": True, "type": "FLOAT"},
+                "quota_tier_multiplier_expires_at": {"nullable": True, "type": "DATETIME"},
+                "quota_monthly_credits": {"nullable": True, "type": "FLOAT"},
+            }
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_cols) == {}
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN quota_tier_multiplier FLOAT"))
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert set(await conn.run_sync(_cols)) == names
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        # Later revisions may stack on this one; it must stay on the single head's lineage.
+        script = ScriptDirectory.from_config(_build_alembic_config(db_url))
+        assert len(script.get_heads()) == 1
+        assert revision in {rev.revision for rev in script.iterate_revisions(script.get_heads()[0], "base")}
+    finally:
+        await engine.dispose()

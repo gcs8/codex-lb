@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
+from app.core import usage as usage_core
 from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
@@ -36,6 +37,8 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountProbeRequest,
     AccountProbeResponse,
+    AccountQuotaTierUpdateRequest,
+    AccountQuotaTierUpdateResponse,
     AccountReactivateResponse,
     AccountRoutingPolicyUpdateRequest,
     AccountRoutingPolicyUpdateResponse,
@@ -389,6 +392,35 @@ async def update_account_limit_warmup(
     return AccountLimitWarmupUpdateResponse(
         status="enabled" if payload.enabled else "disabled",
         enabled=payload.enabled,
+    )
+
+
+@router.put("/{account_id}/quota-tier", response_model=AccountQuotaTierUpdateResponse)
+async def update_account_quota_tier(
+    account_id: str,
+    payload: AccountQuotaTierUpdateRequest,
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountQuotaTierUpdateResponse:
+    try:
+        account = await context.service.set_quota_tier(
+            account_id,
+            payload.quota_tier_multiplier,
+            payload.quota_tier_multiplier_expires_at,
+            payload.quota_monthly_credits,
+        )
+    except ValueError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_quota_tier") from None
+    if account is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountQuotaTierUpdateResponse(
+        account_id=account_id,
+        quota_tier_multiplier=account.quota_tier_multiplier,
+        quota_tier_multiplier_expires_at=account.quota_tier_multiplier_expires_at,
+        quota_monthly_credits=account.quota_monthly_credits,
+        plan_quota_tier_multiplier=usage_core.plan_quota_tier_multiplier(account.plan_type),
+        effective_quota_tier_multiplier=usage_core.effective_quota_tier_multiplier(account),
+        effective_quota_monthly_credits=usage_core.effective_quota_monthly_credits(account),
     )
 
 

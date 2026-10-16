@@ -34,3 +34,32 @@ The Codex client-version fallback is also retained across restarts. Bundled pric
 ---
 
 *Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*
+
+## Plan Capacity and Tier Overrides
+
+Subscription quotas are published per month as multiples of the $20 Plus plan
+(7,560 credits). codex-lb derives each account's weekly capacity from that
+monthly figure: `monthly × 7 / 30`.
+
+| Plan claim | Default tier | Weekly credits | Monthly credits |
+| --- | --- | --- | --- |
+| `plus`, `business`, `team`, `edu` | 1× | 1,764 | 7,560 |
+| `prolite` (Pro 100, Business Premium) | 5× | 8,820 | 37,800 |
+| `pro`, `enterprise` (Pro 200) | 10× | 17,640 | 75,600 |
+
+The plan claim cannot tell every tier apart — a grandfathered Pro 200 (20×
+through October 29, 2026) and Pro 500 (25×) both report `pro`. Set the real tier
+per account on **Accounts → Plan tier**, either as a multiple of the $20 plan or
+as a raw monthly credit allowance, optionally with an end date:
+
+- The end date is **inclusive in US Pacific time** (OpenAI's day boundary):
+  "through 2026-10-29" ends at `2026-10-30T07:00:00Z`. The UI shows the exact UTC
+  instant before saving; the API (`PUT /api/accounts/{id}/quota-tier`) takes it
+  directly.
+- After the end date the plan default applies again automatically.
+- Overrides change capacity everywhere it is used: routing weights, pooled
+  usage, the weekly pace card and `/v1/usage` aggregate limits. Percentages
+  reported by upstream are never changed.
+
+Rolling back to a build without overrides keeps the columns but ignores them,
+so capacity falls back to that build's constants.

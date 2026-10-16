@@ -76,6 +76,13 @@ export const AccountSummarySchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  quotaTierMultiplier: z.number().nullable().optional(),
+  quotaTierMultiplierExpiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  quotaMonthlyCredits: z.number().nullable().optional(),
+  planQuotaTierMultiplier: z.number().nullable().optional(),
+  effectiveQuotaTierMultiplier: z.number().nullable().optional(),
+  effectiveQuotaMonthlyCredits: z.number().nullable().optional(),
+  capacityCreditsSecondaryMonthlyEquivalent: z.number().nullable().optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -252,6 +259,22 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
   status: z.string(),
   enabled: z.boolean(),
+});
+
+export const AccountQuotaTierUpdateRequestSchema = z.object({
+  quotaTierMultiplier: z.number().min(0.1).max(100).nullable(),
+  quotaMonthlyCredits: z.number().min(1).max(7_560_000).nullable().optional(),
+  quotaTierMultiplierExpiresAt: z.string().nullable().optional(),
+});
+
+export const AccountQuotaTierUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  quotaTierMultiplier: z.number().nullable(),
+  quotaTierMultiplierExpiresAt: z.iso.datetime({ offset: true }).nullable(),
+  quotaMonthlyCredits: z.number().nullable().optional(),
+  planQuotaTierMultiplier: z.number().nullable(),
+  effectiveQuotaTierMultiplier: z.number().nullable(),
+  effectiveQuotaMonthlyCredits: z.number().nullable().optional(),
 });
 
 export const AccountRoutingPolicyUpdateRequestSchema = z.object({

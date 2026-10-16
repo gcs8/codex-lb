@@ -5,8 +5,8 @@ import type { WeeklyCreditPace, WeeklyCreditRunwayStatus } from "@/features/dash
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber, formatDateTimeInline, formatModelLabel } from "@/utils/formatters";
+import { PRO_WEEKLY_CAPACITY_CREDITS } from "@/features/dashboard/capacity";
 
-const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 export type WeeklyCreditsPaceCardProps = {
   pace: WeeklyCreditPace | null;
@@ -283,6 +283,14 @@ function RunwayWeeklyCreditsPaceCard({
             </p>
             <p className="text-xs tabular-nums text-muted-foreground">
               {t("dashboard.weeklyPace.heroCreditsLeft", { credits: formatCompactNumber(Math.max(0, headroomCredits)) })}
+            </p>
+            <p className="text-xs tabular-nums text-muted-foreground" data-testid="weekly-pool-capacity">
+              {pace.totalFullCreditsMonthlyEquivalent != null
+                ? t("dashboard.weeklyPace.poolCapacityWeeklyMonthly", {
+                    weekly: formatCompactNumber(pace.totalFullCredits),
+                    monthly: formatCompactNumber(pace.totalFullCreditsMonthlyEquivalent),
+                  })
+                : t("dashboard.weeklyPace.poolCapacityWeekly", { weekly: formatCompactNumber(pace.totalFullCredits) })}
             </p>
           </div>
           <p className="mt-1 text-xs tabular-nums text-muted-foreground">
