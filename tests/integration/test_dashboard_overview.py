@@ -375,6 +375,52 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_counts_distinct_sessions_alongside_conversations(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Codex / Hermes traffic carries session_id, not conversation_id; the
+    overview reports both (gcs8/codex-lb#9). Warmups, blanks and rows outside
+    the timeframe don't count."""
+    now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_dash_sessions", "dash-sessions@example.com"))
+
+        def _log(request_id: str, minutes_ago: float, **extra) -> RequestLog:
+            return RequestLog(
+                account_id="acc_dash_sessions",
+                request_id=request_id,
+                requested_at=now - timedelta(minutes=minutes_ago),
+                model="gpt-5.1",
+                status="success",
+                **extra,
+            )
+
+        session.add_all(
+            [
+                _log("s1-a", 5, session_id="sess-1"),
+                _log("s1-b", 4, session_id="sess-1"),
+                _log("s2-a", 3, session_id="sess-2"),
+                _log("conv-only", 2, conversation_id="conv-x"),
+                _log("blank", 2, session_id=""),
+                _log("warmup", 1, session_id="sess-warm", request_kind="warmup"),
+                _log("old", 60 * 48, session_id="sess-old"),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+
+    assert response.status_code == 200
+    metrics = response.json()["summary"]["metrics"]
+    assert metrics["sessions"] == 2
+    assert metrics["conversations"] == 1
+
+
+@pytest.mark.asyncio
 async def test_conversation_list_agrees_with_dashboard_activity_window(
     async_client,
     db_setup,

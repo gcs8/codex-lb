@@ -19,6 +19,8 @@ export type UsageDonutsProps = {
 	secondaryCenterValue?: number;
 	safeLinePrimary?: SafeLineView | null;
 	safeLineSecondary?: SafeLineView | null;
+	// Hide the 5 h donut when no account in scope has a 5 h window.
+	showPrimary?: boolean;
 };
 
 export function UsageDonuts({
@@ -30,6 +32,7 @@ export function UsageDonuts({
 	secondaryCenterValue,
 	safeLinePrimary,
 	safeLineSecondary,
+	showPrimary = true,
 }: UsageDonutsProps) {
 	const { t } = useTranslation();
 	const primaryChartItems = useMemo(
@@ -59,15 +62,17 @@ export function UsageDonuts({
 
 	return (
 		<Suspense fallback={<div className="grid gap-4 lg:grid-cols-2" />}>
-			<div className="grid min-w-0 gap-4 lg:grid-cols-2">
-			<DonutChart
-				title={t("dashboard.usage.fiveHourCredits")}
-				items={primaryChartItems}
-				total={primaryTotal}
-				centerValue={primaryCenterValue}
-				safeLine={safeLinePrimary}
-				centerLayout="credits"
-			/>
+			<div className={showPrimary ? "grid min-w-0 gap-4 lg:grid-cols-2" : "grid min-w-0 gap-4"}>
+			{showPrimary ? (
+				<DonutChart
+					title={t("dashboard.usage.fiveHourCredits")}
+					items={primaryChartItems}
+					total={primaryTotal}
+					centerValue={primaryCenterValue}
+					safeLine={safeLinePrimary}
+					centerLayout="credits"
+				/>
+			) : null}
 			<DonutChart
 				title={t("dashboard.usage.weeklyCredits")}
 				items={secondaryChartItems}

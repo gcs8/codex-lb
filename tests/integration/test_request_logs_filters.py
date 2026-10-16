@@ -418,6 +418,38 @@ async def test_request_logs_expose_requested_and_actual_service_tiers(async_clie
 
 
 @pytest.mark.asyncio
+async def test_request_logs_never_record_auto_as_actual_service_tier(async_client, db_setup):
+    """``auto`` is a requested value echoed in early upstream events; a request that
+    fails before a completed response must not record it as the served tier (#9)."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_auto", "auto@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_auto",
+            request_id="req_auto_1",
+            model="gpt-5.4",
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=10,
+            status="error",
+            error_code="stream_incomplete",
+            service_tier="auto",
+            requested_service_tier=None,
+            actual_service_tier="auto",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs")
+    assert response.status_code == 200
+    row = response.json()["requests"][0]
+    assert row["actualServiceTier"] is None
+    # The requested/effective value is still kept where it came from.
+    assert row["serviceTier"] == "auto"
+
+
+@pytest.mark.asyncio
 async def test_request_logs_expose_account_plan_type(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

@@ -68,6 +68,7 @@ const DashboardMetricsSchema = z.object({
   topError: z.string().nullable(),
   conversations: z.number().int().nullable().optional().default(null),
   conversationRequests: z.number().int().nonnegative().optional().default(0),
+  sessions: z.number().int().nonnegative().optional(),
 });
 
 const DashboardMetricsComparisonPreviousSchema = z.object({

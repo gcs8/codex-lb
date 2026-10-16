@@ -60,8 +60,12 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
     },
     {
       id: "conversations",
-      label: t("reports.summary.conversations"),
-      value: formatNumber(summary.totalConversations),
+      label: t("reports.summary.conversationsAndSessions"),
+      value: formatNumber(summary.totalConversations + (summary.totalSessions ?? 0)),
+      sub: t("reports.summary.conversationsSessionsSub", {
+        conversations: formatNumber(summary.totalConversations),
+        sessions: formatNumber(summary.totalSessions ?? 0),
+      }),
     },
     {
       id: "cancelled",

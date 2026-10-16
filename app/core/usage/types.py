@@ -146,6 +146,9 @@ class RequestActivityAggregate:
     cancelled_count: int = 0
     conversation_count: int = 0
     conversation_request_count: int = 0
+    # Distinct client sessions (session_id): Codex / Hermes traffic carries a
+    # session, not a Conversations-API conversation_id (gcs8/codex-lb#9).
+    session_count: int = 0
 
 
 @dataclass(frozen=True)

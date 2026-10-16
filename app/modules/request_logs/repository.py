@@ -790,6 +790,7 @@ class RequestLogsRepository:
             func.coalesce(func.sum(union.c.request_count), 0).label("conversation_request_count"),
         )
         conversation_row = (await self._session.execute(conversation_stmt)).one()
+        session_count = await self._distinct_session_count(since, until)
 
         return RequestActivityAggregate(
             request_count=request_count,
@@ -801,7 +802,23 @@ class RequestLogsRepository:
             cancelled_count=await self._cancelled_count(since, until),
             conversation_count=int(conversation_row.conversation_count or 0),
             conversation_request_count=int(conversation_row.conversation_request_count or 0),
+            session_count=session_count,
         )
+
+    async def _distinct_session_count(self, since: datetime, until: datetime | None) -> int:
+        # Sessions are not folded into the hourly rollups, so this reads raw
+        # rows. It undercounts only when request-log retention has already
+        # pruned part of the window.
+        conditions = [
+            RequestLog.requested_at >= since,
+            RequestLog.session_id.is_not(None),
+            RequestLog.session_id != "",
+            *self._eligible_conversation_row_conditions(),
+        ]
+        if until is not None:
+            conditions.append(RequestLog.requested_at < until)
+        stmt = select(func.count(func.distinct(RequestLog.session_id))).where(*conditions)
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
 
     async def _cancelled_count(self, since: datetime, until: datetime | None) -> int:
         # Sourced from the demand rollup (status is a dimension there, unlike
@@ -1060,6 +1077,12 @@ class RequestLogsRepository:
             )
             resolved_conversation_id = _normalize_conversation_id(conversation_id)
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
+            # ``auto`` is a request value, never a served tier: upstream echoes it
+            # in an early ``response.created`` and requests that fail before a
+            # completed response would otherwise record it as the actual tier
+            # (gcs8/codex-lb#9). Served tiers are default/priority/flex/...
+            if isinstance(actual_service_tier, str) and actual_service_tier.strip().lower() == "auto":
+                actual_service_tier = None
             log = RequestLog(
                 sticky_key_source=sticky_key_source,
                 sticky_kind=sticky_kind,

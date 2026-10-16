@@ -25,6 +25,21 @@ describe("UsageDonuts", () => {
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
   });
 
+  it("hides the 5-hour donut when no account has a 5-hour window", async () => {
+    render(
+      <UsageDonuts
+        primaryItems={[]}
+        secondaryItems={[item({ accountId: "acc-2", label: "weekly@example.com", value: 80, remainingPercent: 40, color: "#d9a441" })]}
+        primaryTotal={0}
+        secondaryTotal={200}
+        showPrimary={false}
+      />,
+    );
+
+    expect(await screen.findByText("Weekly Credits")).toBeInTheDocument();
+    expect(screen.queryByText("5-Hour Credits")).not.toBeInTheDocument();
+  });
+
   it("handles empty data gracefully", async () => {
     render(
       <UsageDonuts

@@ -101,6 +101,7 @@ def build_dashboard_overview_summary(
                 "top_error": activity_metrics.top_error,
                 "conversations": activity_metrics.conversation_count,
                 "conversation_requests": activity_metrics.conversation_request_count,
+                "sessions": activity_metrics.session_count,
             }
         ),
         comparison=comparison,
