@@ -3405,7 +3405,11 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
     config = _build_alembic_config(probe_db_url)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [merge_revision]
+    # Single head, and it descends from the merge (later revisions, e.g. #7's tier
+    # override, may sit on top of it).
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert merge_revision in {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
     # Read the parents from the graph, not from a second literal pair: a rebase
     # onto a newer main re-chains ``down_revision``.
     parents = script.get_revision(merge_revision).down_revision
@@ -3438,7 +3442,7 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
         await to_thread.run_sync(lambda p=start_parent: run_upgrade(db_url, p, bootstrap_legacy=False))
         engine = create_async_engine(db_url, future=True)
         try:
-            first = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            first = await to_thread.run_sync(lambda: run_upgrade(db_url, merge_revision, bootstrap_legacy=False))
             assert first.current_revision == merge_revision
             at_head = await _schema_state(engine)
             assert "dashboard_scim_tokens" in at_head["tables"]
@@ -3461,7 +3465,7 @@ async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tm
             assert await _current_heads(engine) == {scim_revision, overflow_revision}
             assert await _schema_state(engine) == at_head
 
-            second = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            second = await to_thread.run_sync(lambda: run_upgrade(db_url, merge_revision, bootstrap_legacy=False))
             assert second.current_revision == merge_revision
             assert await _schema_state(engine) == converged_state
         finally:

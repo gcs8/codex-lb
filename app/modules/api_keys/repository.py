@@ -229,7 +229,17 @@ class ApiKeysRepository:
             return []
         result = await self._session.execute(
             select(Account)
-            .options(load_only(Account.id, Account.plan_type, Account.status))
+            .options(
+                load_only(
+                    Account.id,
+                    Account.plan_type,
+                    Account.status,
+                    # Capacity resolution reads the tier override (#7).
+                    Account.quota_tier_multiplier,
+                    Account.quota_tier_multiplier_expires_at,
+                    Account.quota_monthly_credits,
+                )
+            )
             .where(Account.id.in_(account_ids))
             # An account marked for background deletion is already deleted
             # from the operator's point of view: assignment validation must
@@ -248,7 +258,17 @@ class ApiKeysRepository:
     async def list_all_accounts(self) -> list[Account]:
         result = await self._session.execute(
             select(Account)
-            .options(load_only(Account.id, Account.plan_type, Account.status))
+            .options(
+                load_only(
+                    Account.id,
+                    Account.plan_type,
+                    Account.status,
+                    # Capacity resolution reads the tier override (#7).
+                    Account.quota_tier_multiplier,
+                    Account.quota_tier_multiplier_expires_at,
+                    Account.quota_monthly_credits,
+                )
+            )
             .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             # Status alone is not enough: an unfenced pre-upgrade replica can
             # briefly replace a marked account's terminal status during a
