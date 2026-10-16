@@ -151,8 +151,9 @@ async def test_secondary_raw_policy_and_header_comparator(async_client, app_inst
         {
             "limit_type": "credits",
             "limit_window": "7d",
-            "max_value": 7560,
-            "current_value": 7560,
+            # One Plus account, weekly = 7,560/month x 7/30 (gcs8/codex-lb#7).
+            "max_value": 1764,
+            "current_value": 1764,
             "remaining_value": 0,
             "model_filter": None,
             "reset_at": _iso(EPOCH - 21 * 86400),
@@ -222,15 +223,17 @@ async def test_secondary_silent_reset_still_requires_owner_policy(async_client, 
         {
             "limit_type": "credits",
             "limit_window": "7d",
-            "max_value": 15120,
-            "current_value": 9072,
-            "remaining_value": 6048,
+            # Two Plus accounts at 1,764 weekly each, 60 % used (gcs8/codex-lb#7).
+            "max_value": 3528,
+            "current_value": 2117,
+            "remaining_value": 1411,
             "model_filter": None,
             "reset_at": _iso(EPOCH - 21 * 86400),
             "source": "aggregate",
         }
     ]
-    assert response.json()["account_pool_usage"]["secondary"] == 40.0
+    # Derived weekly capacity (x 7/30) leaves float noise; the percentage is unchanged.
+    assert response.json()["account_pool_usage"]["secondary"] == pytest.approx(40.0)
     assert await _raw_rows() == before
 
 
