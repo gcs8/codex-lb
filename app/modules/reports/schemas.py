@@ -57,6 +57,9 @@ class ReportSummary(DashboardModel):
     total_cancelled: int = 0
     active_accounts: int
     total_conversations: int = 0
+    # Distinct client sessions (Codex / Hermes); conversations only counts
+    # Conversations-API traffic (gcs8/codex-lb#9).
+    total_sessions: int = 0
     avg_cost_per_day: float = 0.0
     avg_requests_per_day: float = 0.0
 

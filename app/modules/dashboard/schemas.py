@@ -29,6 +29,7 @@ class DashboardUsageMetrics(DashboardModel):
     tokens: int | None = None
     conversations: int = 0
     conversation_requests: int = 0
+    sessions: int = 0
     cached_input_tokens: int | None = Field(default=None, alias="cachedInputTokens")
     error_rate: float | None = Field(default=None, alias="errorRate")
     error_count: int | None = Field(default=None, alias="errorCount")

@@ -58,6 +58,7 @@ class SummaryAggregateRow:
     active_accounts: int
     conversation_count: int = 0
     total_cancelled: int = 0
+    session_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,17 @@ class ReportsRepository:
             self._session, [("summary", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
         )
         row = (await self._session.execute(select(*_aggregate_columns(source)))).one()
+        # Sessions aren't a rollup dimension, so count them on raw rows with the
+        # same filters (undercounts only where retention already pruned rows).
+        session_count = (
+            await self._session.execute(
+                select(func.count(func.distinct(RequestLog.session_id))).where(
+                    *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
+                    RequestLog.session_id.is_not(None),
+                    RequestLog.session_id != "",
+                )
+            )
+        ).scalar_one()
         return SummaryAggregateRow(
             total_cost_usd=float(row.cost_usd),
             total_input_tokens=int(row.input_tokens),
@@ -168,6 +180,7 @@ class ReportsRepository:
             total_cancelled=int(row.cancelled_count),
             active_accounts=int(row.active_accounts),
             conversation_count=int(row.conversation_count),
+            session_count=int(session_count or 0),
         )
 
     async def aggregate_by_model(

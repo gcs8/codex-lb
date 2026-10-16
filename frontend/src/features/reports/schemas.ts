@@ -49,6 +49,7 @@ const ReportSummarySchema = z.object({
   totalCancelled: z.number(),
   totalErrors: z.number(),
   totalConversations: z.number(),
+  totalSessions: z.number().optional(),
   activeAccounts: z.number(),
   avgCostPerDay: z.number(),
   avgRequestsPerDay: z.number(),

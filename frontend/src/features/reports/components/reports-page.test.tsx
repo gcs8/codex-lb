@@ -619,7 +619,7 @@ describe("ReportsPage", () => {
     expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByText("API-equivalent cost")).toBeInTheDocument();
     expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
     expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
 
@@ -724,7 +724,7 @@ describe("ReportsPage", () => {
     expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByText("API-equivalent cost")).toBeInTheDocument();
     expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
     expect(screen.getByText("Distribution by UserAgent")).toBeInTheDocument();
     expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
@@ -1001,6 +1001,6 @@ describe("report speed availability", () => {
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByText("API-equivalent cost")).toBeInTheDocument();
   });
 });

@@ -143,6 +143,7 @@ class ReportsService:
                 total_cancelled=summary.total_cancelled,
                 active_accounts=summary.active_accounts,
                 total_conversations=summary.conversation_count,
+                total_sessions=summary.session_count,
                 avg_cost_per_day=round(summary.total_cost_usd / window_days, 4),
                 avg_requests_per_day=round(summary.total_requests / window_days, 2),
             ),

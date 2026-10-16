@@ -482,6 +482,7 @@ export function DashboardPage() {
                 secondaryCenterValue={view.secondaryTotal}
                 safeLinePrimary={view.safeLinePrimary}
                 safeLineSecondary={view.safeLineSecondary}
+                showPrimary={view.hasPrimaryWindow}
               />
               <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
             </div>
@@ -495,6 +496,7 @@ export function DashboardPage() {
               secondaryCenterValue={view.secondaryTotal}
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
+              showPrimary={view.hasPrimaryWindow}
             />
           )}
 

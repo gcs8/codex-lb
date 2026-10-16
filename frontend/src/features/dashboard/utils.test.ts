@@ -818,6 +818,21 @@ describe("buildDashboardView", () => {
     expect(pace?.topApiKeys).toBeUndefined();
   });
 
+  it("reports no 5-hour window when every account is weekly-only", () => {
+    const base = createDashboardOverview();
+    const weeklyOnly = {
+      ...base,
+      accounts: base.accounts.map((account) => ({ ...account, windowMinutesPrimary: null, windowMinutesSecondary: 10_080 })),
+    };
+    expect(buildDashboardView(weeklyOnly, createDefaultRequestLogs(), false).hasPrimaryWindow).toBe(false);
+
+    const mixed = {
+      ...weeklyOnly,
+      accounts: weeklyOnly.accounts.map((account, index) => (index === 0 ? { ...account, windowMinutesPrimary: 300 } : account)),
+    };
+    expect(buildDashboardView(mixed, createDefaultRequestLogs(), false).hasPrimaryWindow).toBe(true);
+  });
+
   it("keeps the overview weekly pace when the projections refinement is null", () => {
     const overviewPace = serverWeeklyPace({ runwayStatus: "safe" });
     const overview = { ...createDashboardOverview(), weeklyCreditPace: overviewPace };
@@ -1420,7 +1435,7 @@ describe("buildDashboardView", () => {
 
     const viewWithoutBurn = buildDashboardView(overview, createDefaultRequestLogs(), false);
 
-    const costIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Est. API Cost"));
+    const costIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("API-equivalent cost"));
     const convIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Conversations"));
     const errorIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Error rate"));
 
@@ -1431,7 +1446,7 @@ describe("buildDashboardView", () => {
     // With burn-rate enabled, conversation should still be between cost and burn-rate
     const viewWithBurn = buildDashboardView(overview, createDefaultRequestLogs(), { isDark: false, showAccountBurnrate: true });
 
-    const costIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Est. API Cost"));
+    const costIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("API-equivalent cost"));
     const convIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Conversations"));
     const burnIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Account burn"));
     const errorIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Error rate"));
@@ -1528,7 +1543,7 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
     const convStat = view.stats.find((s) => s.label.includes("Conversations"));
     expect(convStat?.value).toBe("1,200");
-    expect(convStat?.meta).toBe("Avg req/conv 0.0");
+    expect(convStat?.meta).toBe("Avg req/conv 0.0 · 0 sessions");
   });
 
   it("formats Conversations stat above 1000 as grouped integer, not as '1.2K'", () => {
@@ -1590,10 +1605,10 @@ describe("buildDashboardView", () => {
     } as Parameters<typeof buildDashboardView>[0]);
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    const convStat = view.stats.find((s) => s.label.includes("Conversations + sessions"));
     expect(convStat).toBeDefined();
-    expect(convStat?.label).toBe("Active Conversations (7d)");
-    expect(convStat?.meta).toBe("Avg req/conv 2.5");
+    expect(convStat?.label).toBe("Conversations + sessions (7d)");
+    expect(convStat?.meta).toBe("Avg req/conv 2.5 · 0 sessions");
   });
 
   it("renders em-dash Avg req/conv metadata when conversations is zero", () => {
@@ -1622,8 +1637,8 @@ describe("buildDashboardView", () => {
     } as Parameters<typeof buildDashboardView>[0]);
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    const convStat = view.stats.find((s) => s.label.includes("Conversations + sessions"));
     expect(convStat).toBeDefined();
-    expect(convStat?.meta).toBe("Avg req/conv —");
+    expect(convStat?.meta).toBe("Avg req/conv — · 0 sessions");
   });
 });

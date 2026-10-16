@@ -362,6 +362,8 @@ async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_c
     assert response.status_code == 200
     payload = response.json()
     assert payload["summary"]["totalConversations"] == 1
+    # None of these rows carries a session_id.
+    assert payload["summary"]["totalSessions"] == 0
     assert [(row["date"], row["conversations"]) for row in payload["daily"]] == [
         ("2026-06-01", 1),
         ("2026-06-02", 1),
@@ -1889,3 +1891,48 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     payload3 = response3.json()
     assert payload3["summary"]["totalRequests"] == 0
     assert payload3["summary"]["totalCostUsd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reports_api_counts_distinct_sessions_with_report_filters(async_client, db_setup):
+    """Reports count Codex / Hermes sessions next to conversations (gcs8/codex-lb#9)
+    and apply the same account/model filters."""
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_sessions", "reports-sessions@example.com"))
+        session.add(_make_account("acc_reports_other", "reports-other@example.com"))
+        await session.flush()
+
+        def _log(request_id: str, account_id: str, model: str, session_id: str | None) -> RequestLog:
+            return RequestLog(
+                account_id=account_id,
+                request_id=request_id,
+                requested_at=datetime(2026, 6, 1, 12, 0),
+                model=model,
+                status="success",
+                session_id=session_id,
+            )
+
+        session.add_all(
+            [
+                _log("r-s1a", "acc_reports_sessions", "gpt-5.1", "sess-1"),
+                _log("r-s1b", "acc_reports_sessions", "gpt-5.1", "sess-1"),
+                _log("r-s2", "acc_reports_sessions", "gpt-5.1", "sess-2"),
+                _log("r-blank", "acc_reports_sessions", "gpt-5.1", ""),
+                _log("r-other-model", "acc_reports_sessions", "gpt-4.1", "sess-3"),
+                _log("r-other-account", "acc_reports_other", "gpt-5.1", "sess-4"),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "account_id": "acc_reports_sessions",
+            "model": "gpt-5.1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["totalSessions"] == 2

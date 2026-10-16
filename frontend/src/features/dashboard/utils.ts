@@ -76,6 +76,9 @@ export type {
 export type DashboardView = {
   stats: DashboardStat[];
   primaryUsageItems: RemainingItem[];
+  // False when no account reports a 5 h window (e.g. Pro / Pro 100 plans are
+  // weekly-only); the 5 h donut is hidden rather than shown as exhausted.
+  hasPrimaryWindow: boolean;
   secondaryUsageItems: RemainingItem[];
   /** Sum of visible primary remaining items shown in the donut center label. */
   primaryTotal: number;
@@ -806,10 +809,13 @@ export function buildDashboardView(
         ? ((metrics?.conversationRequests ?? 0) / conversationCount).toFixed(1)
         : "—";
 
+    const sessionCount = metrics?.sessions ?? 0;
     stats.push({
-      label: t("dashboard.stats.conversations", { timeframe: timeframeLabel }),
-      value: formatNumber(conversationCount),
-      meta: t("dashboard.stats.avgRequestsPerConversation", {
+      label: t("dashboard.stats.conversationsAndSessions", { timeframe: timeframeLabel }),
+      value: formatNumber(conversationCount + sessionCount),
+      meta: t("dashboard.stats.conversationsSessionsMeta", {
+        conversations: formatNumber(conversationCount),
+        sessions: formatNumber(sessionCount),
         value: averageRequestsPerConversation,
       }),
       icon: MessageSquare,
@@ -854,9 +860,12 @@ export function buildDashboardView(
     ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
     : rawPrimaryItems;
 
+  const hasPrimaryWindow = overview.accounts.some((account) => account.windowMinutesPrimary != null);
+
   return {
     stats,
     primaryUsageItems,
+    hasPrimaryWindow,
     secondaryUsageItems,
     primaryTotal: sumRemaining(primaryUsageItems),
     secondaryTotal: sumRemaining(secondaryUsageItems),
