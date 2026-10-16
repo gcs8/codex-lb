@@ -2076,6 +2076,16 @@ async def v1_redeem_reset_credit(
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
         return capability_transport_denial
+    if not api_key.allow_reset_credit_redeem:
+        return _logged_error_json_response(
+            request,
+            403,
+            openai_error(
+                "reset_credit_redeem_forbidden",
+                "API key cannot redeem reset credits",
+                error_type="permission_error",
+            ),
+        )
     async with get_background_session() as session:
         account = await AccountsRepository(session).get_by_id(payload.account_id)
         # A pending-deletion account is gone (credentials wiped): treat it

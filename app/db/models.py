@@ -1781,6 +1781,9 @@ class ApiKey(Base):
         server_default=false(),
         nullable=False,
     )
+    allow_reset_credit_redeem: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     usage_sections: Mapped[str | None] = mapped_column(
         Text,
         nullable=False,

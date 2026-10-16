@@ -27,6 +27,18 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+## Reset-credit redemption permission
+
+New keys cannot redeem reset credits unless an operator enables **Allow reset-credit redemption** in the create or edit dialog. This permission does not change inference access, usage visibility, quota privacy, account assignments, revocation or expiry. A key name such as `monitor` has no authorization meaning.
+
+**Compatibility warning: existing monitoring keys are NOT automatically hardened.** The migration backfills every existing key to `true` to preserve its current behavior. A future rollout must explicitly update monitoring keys to `false`. This source change makes no live permission updates.
+
+`GET /v1/reset-credit` still lists cached credits within the key's eligible account pool. `POST /v1/reset-credit` returns HTTP 403 with OpenAI error code `reset_credit_redeem_forbidden` when the permission is false, before redemption work starts. Both routes require a valid bearer key even when global proxy authentication is disabled.
+
+The dashboard API field is `allowResetCreditRedeem`. Create defaults to `false`; PATCH omission preserves the current value. Only JSON `true` and `false` are valid. Explicit null, strings, numeric values, arrays and objects return the existing 422 dashboard validation response. Unknown fields retain the existing schema's ignore behavior and never grant permission. Key creation, listing and regeneration responses include the persisted boolean; regeneration preserves it. There is no separate API-key import/export endpoint in this source. Raw database inserts that omit the field use the database default `false`.
+
+Downgrading removes the permission. Re-upgrading backfills all then-existing keys to `true` again, so an operator must reapply any hardening after that roundtrip.
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

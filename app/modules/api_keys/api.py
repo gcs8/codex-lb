@@ -60,6 +60,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         traffic_class=row.traffic_class,
         transport_policy_override=row.transport_policy_override,
         thread_cache_identity_override=row.thread_cache_identity_override,
+        allow_reset_credit_redeem=row.allow_reset_credit_redeem,
         usage_sections=row.usage_sections,
         expires_at=row.expires_at,
         is_active=row.is_active,
@@ -153,6 +154,7 @@ async def create_api_key(
                 traffic_class=payload.traffic_class or "foreground",
                 transport_policy_override=payload.transport_policy_override,
                 thread_cache_identity_override=payload.thread_cache_identity_override,
+                allow_reset_credit_redeem=payload.allow_reset_credit_redeem,
                 usage_sections=(
                     payload.usage_sections
                     if payload.usage_sections is not None
@@ -226,6 +228,8 @@ async def update_api_key(
         transport_policy_override_set="transport_policy_override" in fields,
         thread_cache_identity_override=payload.thread_cache_identity_override,
         thread_cache_identity_override_set="thread_cache_identity_override" in fields,
+        allow_reset_credit_redeem=payload.allow_reset_credit_redeem,
+        allow_reset_credit_redeem_set="allow_reset_credit_redeem" in fields,
         usage_sections=payload.usage_sections,
         usage_sections_set="usage_sections" in fields,
         expires_at=payload.expires_at,

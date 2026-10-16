@@ -385,6 +385,7 @@ class ApiKeysRepository:
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
         thread_cache_identity_override: str | None | _Unset = _UNSET,
+        allow_reset_credit_redeem: bool | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
@@ -434,6 +435,9 @@ class ApiKeysRepository:
         if thread_cache_identity_override is not _UNSET:
             assert thread_cache_identity_override is None or isinstance(thread_cache_identity_override, str)
             row.thread_cache_identity_override = thread_cache_identity_override
+        if allow_reset_credit_redeem is not _UNSET:
+            assert isinstance(allow_reset_credit_redeem, bool)
+            row.allow_reset_credit_redeem = allow_reset_credit_redeem
         if usage_sections is not _UNSET:
             assert isinstance(usage_sections, str)
             row.usage_sections = usage_sections

@@ -29,6 +29,7 @@ import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-edi
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
+import { ResetCreditPermissionToggle } from "./reset-credit-permission-toggle";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
@@ -96,6 +97,7 @@ type ApiKeyEditDraft = {
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
+  allowResetCreditRedeem: boolean;
   usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
@@ -114,6 +116,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
+    allowResetCreditRedeem: apiKey.allowResetCreditRedeem,
     usageSections: apiKey.usageSections,
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
@@ -178,6 +181,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
+      allowResetCreditRedeem: draft.allowResetCreditRedeem,
       usageSections: draft.usageSections,
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
@@ -272,6 +276,15 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.usageSections")}</div>
               <UsageSectionsMultiSelect value={draft.usageSections} onChange={(usageSections) => updateDraft({ usageSections })} />
+            </div>
+
+            <div>
+              <ResetCreditPermissionToggle
+                id="edit-api-key-reset-credit"
+                value={draft.allowResetCreditRedeem}
+                onChange={(allowResetCreditRedeem) => updateDraft({ allowResetCreditRedeem })}
+                disabled={busy}
+              />
             </div>
 
             <div className="space-y-1">

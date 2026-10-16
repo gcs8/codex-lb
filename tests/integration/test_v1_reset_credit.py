@@ -87,7 +87,7 @@ async def _enable_api_key_auth(async_client) -> None:
 
 
 async def _create_api_key(async_client, *, name: str) -> tuple[str, str]:
-    response = await async_client.post("/api/api-keys/", json={"name": name})
+    response = await async_client.post("/api/api-keys/", json={"name": name, "allowResetCreditRedeem": True})
     assert response.status_code == 200
     payload = response.json()
     return payload["id"], payload["key"]
