@@ -58,9 +58,11 @@ from collections.abc import AsyncIterator, Mapping
 from fastapi.responses import StreamingResponse
 from starlette.types import Message, Receive, Scope, Send
 
+from app.core.clock import REAL_SCHEDULER
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, stream_terminal_delivery_total
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +214,17 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
         exc_name: str | None = None
         cancelled = False
         try:
-            await super().__call__(scope, receive, traced_send)
+            try:
+                await super().__call__(scope, receive, traced_send)
+            finally:
+                # Starlette has stopped/drained its body task on both ASGI
+                # contracts. Closing the body chain now drains its owned read
+                # before any source close, even when cancellation hit send.
+                aclose = getattr(self.body_iterator, "aclose", None)
+                if callable(aclose):
+                    cancellation = await _await_cleanup_deferring_cancellation(aclose(), scheduler=REAL_SCHEDULER)
+                    if cancellation is not None:
+                        raise cancellation
         except asyncio.CancelledError:
             cancelled = True
             raise

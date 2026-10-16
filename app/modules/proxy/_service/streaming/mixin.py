@@ -44,6 +44,7 @@ from app.core.errors import synthetic_stream_failure_event as response_failed_ev
 from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, parse_sse_event_payload
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow as utcnow
@@ -516,6 +517,11 @@ class _StreamingMixin(_StreamingRetryMixin):
 
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
+        # The upstream generator from ``core_stream_responses``. Closing only this
+        # attempt generator does not finalize a child suspended at its yield, so
+        # the attempt owns closing it in ``finally`` (otherwise its transport and
+        # cleanup run only when the garbage collector finalizes it).
+        upstream_iterator: AsyncIterator[str] | None = None
         if api_key_reservation is not None:
             api_key_reservation_heartbeat_task = scheduler_for(proxy).create_task(
                 proxy._run_api_key_reservation_heartbeat(
@@ -561,6 +567,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 raise_for_status=True,
             )
             iterator = _facade()._stream_iterator_after_capacity_admission(stream)
+            upstream_iterator = iterator
             try:
                 first = await iterator.__anext__()
                 first_observed_at = clock.monotonic()
@@ -992,6 +999,17 @@ class _StreamingMixin(_StreamingRetryMixin):
             api_key_reservation_heartbeat_stop.set()
             if api_key_reservation_heartbeat_task is not None:
                 proxy._cancel_api_key_reservation_heartbeat_task(api_key_reservation_heartbeat_task)
+            upstream_aclose = getattr(upstream_iterator, "aclose", None)
+            if callable(upstream_aclose):
+                try:
+                    upstream_close_cancellation = await _await_cleanup_deferring_cancellation(
+                        upstream_aclose(), scheduler=scheduler_for(proxy)
+                    )
+                except Exception:
+                    _facade().logger.warning("Failed to close upstream Responses stream", exc_info=True)
+                    upstream_close_cancellation = None
+            else:
+                upstream_close_cancellation = None
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             input_tokens = usage.input_tokens if usage else None
@@ -1066,3 +1084,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
             )
+            # Re-deliver a cancellation deferred while closing the upstream child,
+            # only after the lease release and request log above have completed.
+            if upstream_close_cancellation is not None:
+                raise upstream_close_cancellation

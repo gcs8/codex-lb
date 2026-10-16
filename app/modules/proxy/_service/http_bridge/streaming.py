@@ -54,6 +54,7 @@ from app.core.openai.requests import (
 )
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_block_with_payload
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -994,6 +995,17 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_wait_event: asyncio.Event | None = None,
         capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
+        async def close_child(child: AsyncIterator[str]) -> None:
+            aclose = getattr(child, "aclose", None)
+            if not callable(aclose):
+                return
+            try:
+                cancellation = await _await_cleanup_deferring_cancellation(aclose(), scheduler=scheduler_for(self))
+                if cancellation is not None:
+                    raise cancellation
+            except Exception:
+                logger.warning("Failed to close HTTP Responses child stream", exc_info=True)
+
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
         if http_bridge_active is False:
@@ -1076,7 +1088,7 @@ class _HTTPBridgeStreamingMixin:
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
-            async for line in stream_with_retry(
+            retry_stream = stream_with_retry(
                 payload,
                 headers,
                 codex_session_affinity=codex_session_affinity,
@@ -1091,8 +1103,12 @@ class _HTTPBridgeStreamingMixin:
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            ):
-                yield line
+            )
+            try:
+                async for line in retry_stream:
+                    yield line
+            finally:
+                await close_child(retry_stream)
             return
 
         request_scope_id = ensure_request_scope_id()
@@ -1100,37 +1116,38 @@ class _HTTPBridgeStreamingMixin:
         bridge_yielded_any = False
         bridge_transport_unavailable = False
         bridge_attempt_started_at = clock_for(self).monotonic()
+        bridge_stream = self._stream_via_http_bridge(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            suppress_text_done_events=suppress_text_done_events,
+            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+            max_sessions=runtime_config.max_sessions,
+            queue_limit=runtime_config.queue_limit,
+            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+            downstream_turn_state=downstream_turn_state,
+            forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
+            proxy_api_authorization=proxy_api_authorization,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
+            rewritten_file_account_id=rewritten_file_account_id,
+            client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_startup_wait_event,
+            capacity_startup_ready_event=capacity_startup_ready_event,
+            deferred_account_backoff_tracker=deferred_account_backoff_tracker,
+            bridge_payload=bridge_payload,
+        )
         try:
             try:
-                async for line in self._stream_via_http_bridge(
-                    payload,
-                    headers,
-                    codex_session_affinity=codex_session_affinity,
-                    propagate_http_errors=propagate_http_errors,
-                    openai_cache_affinity=openai_cache_affinity,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    suppress_text_done_events=suppress_text_done_events,
-                    idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-                    codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-                    max_sessions=runtime_config.max_sessions,
-                    queue_limit=runtime_config.queue_limit,
-                    prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-                    downstream_turn_state=downstream_turn_state,
-                    forwarded_request=forwarded_request,
-                    forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                    forwarded_legacy_signature=forwarded_legacy_signature,
-                    proxy_api_authorization=proxy_api_authorization,
-                    forwarded_affinity_kind=forwarded_affinity_kind,
-                    forwarded_affinity_key=forwarded_affinity_key,
-                    rewritten_file_account_id=rewritten_file_account_id,
-                    client_ip=client_ip,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                    capacity_startup_wait_event=capacity_startup_wait_event,
-                    capacity_startup_ready_event=capacity_startup_ready_event,
-                    deferred_account_backoff_tracker=deferred_account_backoff_tracker,
-                    bridge_payload=bridge_payload,
-                ):
+                async for line in bridge_stream:
                     bridge_yielded_any = True
                     yield line
             except ProxyResponseError as exc:
@@ -1223,36 +1240,44 @@ class _HTTPBridgeStreamingMixin:
                     mark_upstream_websocket_transport_failure()
                 bridge_transport_unavailable = True
         finally:
-            with anyio.CancelScope(shield=True):
+
+            async def cleanup_bridge() -> None:
                 try:
-                    lifecycle = deferred_account_backoff_tracker.current_lifecycle
-                    if lifecycle is not None:
-                        pending_backoffs = lifecycle.pending_backoffs
-                        if lifecycle.settlement_confirmed:
-                            await self._drain_deferred_account_error_backoffs(pending_backoffs)
-                        elif not lifecycle.settlement_owned and (
-                            pending_backoffs or lifecycle.reservation != api_key_reservation
-                        ):
-                            # Session creation can fail before the request is
-                            # submitted. Until submit returns, this wrapper owns
-                            # the current lifecycle and may release exactly that
-                            # reservation. Once ownership transfers, the request
-                            # finalizer is the only safe settlement owner.
-                            try:
-                                await self._release_websocket_reservation(lifecycle.reservation)
-                            except Exception:
-                                logger.warning(
-                                    "Failed to release HTTP bridge API key reservation before deferred backoff",
-                                    exc_info=True,
-                                )
-                            else:
-                                lifecycle.settlement_confirmed = True
-                                await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                    await close_child(bridge_stream)
                 finally:
-                    await _release_http_bridge_unanchored_handoffs_for_request(
-                        self,
-                        request_scope_id=request_scope_id,
-                    )
+                    try:
+                        lifecycle = deferred_account_backoff_tracker.current_lifecycle
+                        if lifecycle is not None:
+                            pending_backoffs = lifecycle.pending_backoffs
+                            if lifecycle.settlement_confirmed:
+                                await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                            elif not lifecycle.settlement_owned and (
+                                pending_backoffs or lifecycle.reservation != api_key_reservation
+                            ):
+                                # Session creation can fail before the request is
+                                # submitted. Until submit returns, this wrapper owns
+                                # the current lifecycle and may release exactly that
+                                # reservation. Once ownership transfers, the request
+                                # finalizer is the only safe settlement owner.
+                                try:
+                                    await self._release_websocket_reservation(lifecycle.reservation)
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to release HTTP bridge API key reservation before deferred backoff",
+                                        exc_info=True,
+                                    )
+                                else:
+                                    lifecycle.settlement_confirmed = True
+                                    await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                    finally:
+                        await _release_http_bridge_unanchored_handoffs_for_request(
+                            self,
+                            request_scope_id=request_scope_id,
+                        )
+
+            cancellation = await _await_cleanup_deferring_cancellation(cleanup_bridge(), scheduler=scheduler_for(self))
+            if cancellation is not None:
+                raise cancellation
         if not bridge_transport_unavailable:
             return
         logger.warning(
@@ -1260,7 +1285,7 @@ class _HTTPBridgeStreamingMixin:
             request_id,
         )
         stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
-        async for line in stream_with_retry(
+        retry_stream = stream_with_retry(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
@@ -1275,8 +1300,12 @@ class _HTTPBridgeStreamingMixin:
             upstream_stream_transport_override="http",
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        ):
-            yield line
+        )
+        try:
+            async for line in retry_stream:
+                yield line
+        finally:
+            await close_child(retry_stream)
 
     async def _stream_via_http_bridge_impl(
         self: Any,
