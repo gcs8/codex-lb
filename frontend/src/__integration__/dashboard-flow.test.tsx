@@ -239,8 +239,9 @@ describe("dashboard flow integration", () => {
     const expectHealthySurfaces = () => {
       expect(screen.getByText("Requests (7d)")).toBeInTheDocument();
       expect(screen.getByText("424.24K")).toBeInTheDocument();
-      expect(screen.getByText("Account burn projection (5h/7d)")).toBeInTheDocument();
-      expect(screen.getByText("0.4 / 0.1")).toBeInTheDocument();
+      expect(screen.getByText("Pool burn projection (5h/7d)")).toBeInTheDocument();
+      // Single-account fixture: the old account-equivalent "0.4 / 0.1" at two decimals.
+      expect(screen.getByText("0.39× / 0.12×")).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "5-Hour Credits" })).toBeInTheDocument();
       expect(screen.getByText("6,055")).toBeInTheDocument();
       expect(

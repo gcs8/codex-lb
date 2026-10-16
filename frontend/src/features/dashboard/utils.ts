@@ -253,127 +253,95 @@ function buildStatComparison(
   return undefined;
 }
 
-function windowUsedAccountEquivalents(
+type PoolBurnProjection = {
+  // Projected end-of-window demand as a multiple of pool capacity (credits, not
+  // account counts), so it is never clamped and mixed plans weigh by capacity.
+  ratio: number;
+  demandCredits: number;
+  poolCredits: number;
+  // First account projected to reach 100 % before its own reset, if any.
+  firstExhaustion: { label: string; inHours: number } | null;
+  lowConfidence: boolean;
+};
+
+const BURN_LOW_CONFIDENCE_MAX_HOURS = 24;
+
+function projectPoolBurn(
   overview: DashboardOverview,
   windowKey: "primary" | "secondary",
-): number | null {
-  let usedEquivalent = 0;
-  let includedAccounts = 0;
+  nowMs: number = Date.now(),
+): PoolBurnProjection | null {
+  let demandCredits = 0;
+  let poolCredits = 0;
+  let included = 0;
+  let lowConfidence = false;
+  let firstExhaustion: PoolBurnProjection["firstExhaustion"] = null;
 
   for (const account of overview.accounts) {
     const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
     const remainingPercent =
       windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
-
-    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
-      continue;
-    }
-
-    let accountEquivalent = (100 - clampPercent(remainingPercent)) / 100;
-    if (windowKey === "secondary" && account.status === "quota_exceeded") {
-      accountEquivalent = Math.max(accountEquivalent, 1);
-    }
-
-    usedEquivalent += accountEquivalent;
-    includedAccounts += 1;
-  }
-
-  return includedAccounts > 0 ? usedEquivalent : null;
-}
-
-function windowProjectedAccountEquivalents(
-  overview: DashboardOverview,
-  windowKey: "primary" | "secondary",
-): number | null {
-  let projectedEquivalent = 0;
-  let includedAccounts = 0;
-  const nowMs = Date.now();
-
-  for (const account of overview.accounts) {
-    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
-    const remainingPercent =
-      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
+    const capacity = windowKey === "primary" ? account.capacityCreditsPrimary : account.capacityCreditsSecondary;
     const resetAt = windowKey === "primary" ? account.resetAtPrimary : account.resetAtSecondary;
-
-    if (windowMinutes == null || !isFiniteNumber(remainingPercent) || windowMinutes <= 0) {
+    if (windowMinutes == null || windowMinutes <= 0 || !isFiniteNumber(remainingPercent)) {
+      continue;
+    }
+    if (!isFiniteNumber(capacity) || capacity <= 0) {
       continue;
     }
 
-    const usedEquivalent = (100 - clampPercent(remainingPercent)) / 100;
-    let projected = usedEquivalent;
-
-    if (resetAt) {
-      const resetAtMs = Date.parse(resetAt);
-      if (Number.isFinite(resetAtMs)) {
-        const windowMs = windowMinutes * 60_000;
-        const secondsUntilReset = Math.max(0, (resetAtMs - nowMs) / 1000);
-        const elapsedSeconds = Math.max(0, windowMs / 1000 - secondsUntilReset);
-        if (elapsedSeconds > 0) {
-          projected = usedEquivalent * ((windowMs / 1000) / elapsedSeconds);
+    let used = (100 - clampPercent(remainingPercent)) / 100;
+    if (windowKey === "secondary" && account.status === "quota_exceeded") {
+      used = Math.max(used, 1);
+    }
+    const windowHours = windowMinutes / 60;
+    let projectedFraction = used;
+    const resetAtMs = resetAt ? Date.parse(resetAt) : Number.NaN;
+    if (Number.isFinite(resetAtMs)) {
+      const hoursUntilReset = Math.max(0, (resetAtMs - nowMs) / 3_600_000);
+      const elapsedHours = Math.max(0, windowHours - hoursUntilReset);
+      if (elapsedHours > 0) {
+        projectedFraction = Math.max(used, (used * windowHours) / elapsedHours);
+        if (elapsedHours < Math.min(BURN_LOW_CONFIDENCE_MAX_HOURS, windowHours / 7)) {
+          lowConfidence = true;
         }
+        const hoursToFull = used >= 1 ? 0 : used > 0 ? ((1 - used) * elapsedHours) / used : Number.POSITIVE_INFINITY;
+        if (hoursToFull < hoursUntilReset && (firstExhaustion === null || hoursToFull < firstExhaustion.inHours)) {
+          firstExhaustion = {
+            label: account.displayName || account.email || account.accountId,
+            inHours: hoursToFull,
+          };
+        }
+      } else {
+        lowConfidence = true;
       }
     }
 
-    if (windowKey === "secondary" && account.status === "quota_exceeded") {
-      projected = Math.max(projected, 1);
-    }
-
-    projectedEquivalent += projected;
-    includedAccounts += 1;
+    demandCredits += projectedFraction * capacity;
+    poolCredits += capacity;
+    included += 1;
   }
 
-  return includedAccounts > 0 ? projectedEquivalent : null;
-}
-
-function windowIncludedAccountCount(
-  overview: DashboardOverview,
-  windowKey: "primary" | "secondary",
-): number {
-  let includedAccounts = 0;
-
-  for (const account of overview.accounts) {
-    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
-    const remainingPercent =
-      windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
-
-    if (windowMinutes == null || !isFiniteNumber(remainingPercent)) {
-      continue;
-    }
-
-    includedAccounts += 1;
-  }
-
-  return includedAccounts;
-}
-
-function clampBurnEquivalent(value: number | null, maxEquivalent: number): number | null {
-  if (!isFiniteNumber(value)) {
+  if (included === 0 || poolCredits <= 0) {
     return null;
   }
-
-  const clamped = Math.max(0, value);
-  if (maxEquivalent <= 0) {
-    return clamped;
-  }
-  return Math.min(clamped, maxEquivalent);
+  return { ratio: demandCredits / poolCredits, demandCredits, poolCredits, firstExhaustion, lowConfidence };
 }
 
-function plusAccountsBurnEquivalent(
-  overview: DashboardOverview,
-  windowKey: "primary" | "secondary",
-): number | null {
-  const maxEquivalent = windowIncludedAccountCount(overview, windowKey);
-  const projectedEquivalent = clampBurnEquivalent(windowProjectedAccountEquivalents(overview, windowKey), maxEquivalent);
-  const usedEquivalent = clampBurnEquivalent(windowUsedAccountEquivalents(overview, windowKey), maxEquivalent);
-
-  return projectedEquivalent ?? usedEquivalent;
-}
-
-function formatBurnEquivalent(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) {
+function formatBurnRatio(projection: PoolBurnProjection | null): string {
+  if (projection === null || !Number.isFinite(projection.ratio)) {
     return "--";
   }
-  return value.toFixed(1);
+  return `${projection.ratio.toFixed(2)}×`;
+}
+
+function formatBurnHours(hours: number): string {
+  if (hours <= 0) {
+    return "now";
+  }
+  const days = Math.floor(hours / 24);
+  const rest = Math.round(hours - days * 24);
+  return days > 0 ? `~${days}d ${rest}h` : `~${Math.max(1, rest)}h`;
 }
 
 function buildBurnTrend(points: TrendPoint[], currentValue: number | null): { value: number }[] {
@@ -763,11 +731,12 @@ export function buildDashboardView(
   const trends = overview.trends;
   const primaryBurnLabel = formatBurnWindowLabel("primary", overview.summary.primaryWindow.windowMinutes);
   const secondaryBurnLabel = formatBurnWindowLabel("secondary", overview.summary.secondaryWindow?.windowMinutes);
-  const primaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "primary");
-  const secondaryBurnEquivalent = plusAccountsBurnEquivalent(overview, "secondary");
-  const combinedBurnEquivalent =
-    (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0) > 0
-      ? (primaryBurnEquivalent ?? 0) + (secondaryBurnEquivalent ?? 0)
+  const showPrimaryBurn = overview.accounts.some((account) => account.windowMinutesPrimary != null);
+  const primaryBurn = showPrimaryBurn ? projectPoolBurn(overview, "primary") : null;
+  const secondaryBurn = projectPoolBurn(overview, "secondary");
+  const combinedBurnRatio =
+    (primaryBurn?.ratio ?? 0) + (secondaryBurn?.ratio ?? 0) > 0
+      ? (primaryBurn?.ratio ?? 0) + (secondaryBurn?.ratio ?? 0)
       : null;
   const comparison = overview.summary.comparison;
   const canCompare = comparison?.canCompare ?? false;
@@ -825,17 +794,37 @@ export function buildDashboardView(
   }
 
   if (showAccountBurnrate) {
+    const headline = secondaryBurn ?? primaryBurn;
+    const metaParts: string[] = [];
+    if (headline) {
+      metaParts.push(
+        t("dashboard.stats.poolBurnDemand", {
+          demand: formatCompactNumber(headline.demandCredits),
+          pool: formatCompactNumber(headline.poolCredits),
+        }),
+      );
+      metaParts.push(
+        headline.firstExhaustion
+          ? t("dashboard.stats.poolBurnFirstExhaustion", {
+              account: headline.firstExhaustion.label,
+              when: formatBurnHours(headline.firstExhaustion.inHours),
+            })
+          : t("dashboard.stats.poolBurnNoExhaustion"),
+      );
+      if (headline.lowConfidence) {
+        metaParts.push(t("dashboard.stats.poolBurnLowConfidence"));
+      }
+    }
     stats.push({
-      label: t("dashboard.stats.accountBurnProjection", { primary: primaryBurnLabel, secondary: secondaryBurnLabel }),
-      value: `${formatBurnEquivalent(primaryBurnEquivalent)} / ${formatBurnEquivalent(secondaryBurnEquivalent)}`,
-      meta: t("dashboard.stats.projectedAccountEquivalents", {
-        primaryValue: formatBurnEquivalent(primaryBurnEquivalent),
-        primary: primaryBurnLabel,
-        secondaryValue: formatBurnEquivalent(secondaryBurnEquivalent),
-        secondary: secondaryBurnLabel,
-      }),
+      label: showPrimaryBurn
+        ? t("dashboard.stats.poolBurnProjection", { windows: `${primaryBurnLabel}/${secondaryBurnLabel}` })
+        : t("dashboard.stats.poolBurnProjection", { windows: secondaryBurnLabel }),
+      value: showPrimaryBurn
+        ? `${formatBurnRatio(primaryBurn)} / ${formatBurnRatio(secondaryBurn)}`
+        : formatBurnRatio(secondaryBurn),
+      meta: metaParts.join(" · "),
       icon: Flame,
-      trend: buildBurnTrend(trends.tokens, combinedBurnEquivalent),
+      trend: buildBurnTrend(trends.tokens, combinedBurnRatio),
       trendColor: TREND_COLORS[3],
     });
   }

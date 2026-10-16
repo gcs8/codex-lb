@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DashboardOverviewSchema } from "@/features/dashboard/schemas";
 import type { AccountSummary, Depletion } from "@/features/dashboard/schemas";
@@ -1127,6 +1127,8 @@ describe("buildDashboardView", () => {
           resetAtSecondary: null,
           windowMinutesPrimary: 300,
           windowMinutesSecondary: 10080,
+          capacityCreditsPrimary: 225,
+          capacityCreditsSecondary: 1_764,
         }),
         account({
           accountId: "acc-2",
@@ -1139,6 +1141,8 @@ describe("buildDashboardView", () => {
           resetAtSecondary: null,
           windowMinutesPrimary: 300,
           windowMinutesSecondary: 10080,
+          capacityCreditsPrimary: 225,
+          capacityCreditsSecondary: 1_764,
         }),
       ],
     });
@@ -1146,10 +1150,43 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
     const burn = view.stats[3];
 
-    expect(burn.label).toBe("Account burn projection (5h/7d)");
-    expect(burn.value).toBe("0.7 / 0.8");
-    expect(burn.meta).toBe("Projected account-equivalents: 0.7/5h · 0.8/7d");
+    // Without reset times there is nothing to extrapolate: demand = used credits.
+    // 5h: (0.5 + 0.2) x 225 / 450 = 0.35x; 7d: 0.75 x 1,764 / 3,528 = 0.375x.
+    expect(burn.label).toBe("Pool burn projection (5h/7d)");
+    expect(burn.value).toBe("0.35× / 0.38×");
+    expect(burn.meta).toBe("1.32K of 3.53K credits by reset · no account runs out before reset");
     expect(view.stats[4]?.label).toBe("Error rate (7d)");
+  });
+
+  it("projects pool burn in credits without clamping and names the first account to run out", () => {
+    // Live h015a shape (2026-10-15): weekly-only pool, 19.6 h into the week.
+    const now = Date.parse("2026-10-16T01:36:00Z");
+    const resetIn = (hours: number) => new Date(now + hours * 3_600_000).toISOString();
+    const weekly = (id: string, used: number, capacity: number) =>
+      account({
+        accountId: id,
+        email: `${id}@example.com`,
+        usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 100 - used },
+        resetAtSecondary: resetIn(168 - 19.6),
+        windowMinutesPrimary: null,
+        windowMinutesSecondary: 10_080,
+        capacityCreditsSecondary: capacity,
+      });
+    const overview = createDashboardOverview({
+      accounts: [weekly("pro", 7, 35_280), weekly("lite-a", 25, 8_820), weekly("lite-b", 26, 8_820)],
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const burn = buildDashboardView(overview, createDefaultRequestLogs(), false).stats[3];
+      // Account-count version showed min(0.60 + 2.14 + 2.24, 3) = "3.0".
+      // Credits: (0.07x35,280 + 0.25x8,820 + 0.26x8,820) x 168/19.6 = 59.7K of 52.9K.
+      expect(burn.label).toBe("Pool burn projection (7d)");
+      expect(burn.value).toBe("1.13×");
+      expect(burn.meta).toBe("59.72K of 52.92K credits by reset · lite-b@example.com runs out in ~2d 8h · low confidence (<24h of data)");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("can hide the account burn rate card", () => {
@@ -1160,7 +1197,7 @@ describe("buildDashboardView", () => {
       showAccountBurnrate: false,
     });
 
-    expect(view.stats.map((stat) => stat.label)).not.toContain("Account burn projection (5h/7d)");
+    expect(view.stats.map((stat) => stat.label).some((label) => label.startsWith("Pool burn projection"))).toBe(false);
     expect(view.stats).toHaveLength(4);
   });
 
@@ -1179,6 +1216,8 @@ describe("buildDashboardView", () => {
           resetAtSecondary: null,
           windowMinutesPrimary: 300,
           windowMinutesSecondary: 10080,
+          capacityCreditsPrimary: 225,
+          capacityCreditsSecondary: 1_764,
         }),
       ],
     });
@@ -1186,8 +1225,8 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
     const burn = view.stats[3];
 
-    expect(burn.value).toBe("0.0 / 1.0");
-    expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
+    // Quota-exceeded counts as a fully used weekly window regardless of the sample.
+    expect(burn.value).toBe("0.00× / 1.00×");
   });
 
   it("shows only the averaged cost text on the estimated cost card", () => {
@@ -1448,7 +1487,7 @@ describe("buildDashboardView", () => {
 
     const costIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("API-equivalent cost"));
     const convIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Conversations"));
-    const burnIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Account burn"));
+    const burnIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Pool burn"));
     const errorIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Error rate"));
 
     expect(convIdxB).toBeGreaterThan(costIdxB);

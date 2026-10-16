@@ -8,6 +8,7 @@ A read-only audit of every dashboard, reports, accounts and APIs figure against 
 - The 5 h donut is hidden when no account in scope reports a 5 h window.
 - Cost is labelled "API-equivalent cost" (dashboard tile, reports total).
 - `auto` is never stored as `actual_service_tier`.
+- The account burn projection tile becomes a pool burn projection: projected demand in credits over pool capacity (no clamp to the account count), naming the first account projected to run out before its reset, marked low-confidence early in the window.
 
 ## Impact
 
