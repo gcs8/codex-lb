@@ -834,7 +834,7 @@
   "dashboard.stats.poolBurnDemand": "重置前 {{demand}} / {{pool}} 积分",
   "dashboard.stats.poolBurnFirstExhaustion": "{{account}} 将在 {{when}} 后耗尽",
   "dashboard.stats.poolBurnNoExhaustion": "重置前无账户耗尽",
-  "dashboard.stats.poolBurnLowConfidence": "置信度低（数据不足 24 小时）",
+  "dashboard.stats.poolBurnLowConfidence": "置信度低（数据不足 {{span}}）",
   "dashboard.stats.avgPerDay": "日均 {{value}}",
   "dashboard.stats.avgPerHour": "时均 {{value}}",
   "dashboard.stats.errorRate": "错误率 ({{timeframe}})",

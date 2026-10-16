@@ -262,9 +262,15 @@ type PoolBurnProjection = {
   // First account projected to reach 100 % before its own reset, if any.
   firstExhaustion: { label: string; inHours: number } | null;
   lowConfidence: boolean;
+  // Elapsed-hours cutoff below which the projection is flagged low confidence
+  // (24 h for the weekly window, windowHours / 7 for shorter ones).
+  lowConfidenceCutoffHours: number;
 };
 
 const BURN_LOW_CONFIDENCE_MAX_HOURS = 24;
+// Routing never uses these accounts, so they are neither supply nor demand.
+// Mirrors the pace card's PACE_ELIGIBLE_ACCOUNT_STATUSES (gcs8/codex-lb#31).
+const BURN_EXCLUDED_ACCOUNT_STATUSES = new Set(["paused", "deactivated"]);
 
 function projectPoolBurn(
   overview: DashboardOverview,
@@ -275,9 +281,13 @@ function projectPoolBurn(
   let poolCredits = 0;
   let included = 0;
   let lowConfidence = false;
+  let lowConfidenceCutoffHours = 0;
   let firstExhaustion: PoolBurnProjection["firstExhaustion"] = null;
 
   for (const account of overview.accounts) {
+    if (BURN_EXCLUDED_ACCOUNT_STATUSES.has(account.status)) {
+      continue;
+    }
     const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
     const remainingPercent =
       windowKey === "primary" ? account.usage?.primaryRemainingPercent : account.usage?.secondaryRemainingPercent;
@@ -295,6 +305,8 @@ function projectPoolBurn(
       used = Math.max(used, 1);
     }
     const windowHours = windowMinutes / 60;
+    const cutoffHours = Math.min(BURN_LOW_CONFIDENCE_MAX_HOURS, windowHours / 7);
+    lowConfidenceCutoffHours = Math.max(lowConfidenceCutoffHours, cutoffHours);
     let projectedFraction = used;
     const resetAtMs = resetAt ? Date.parse(resetAt) : Number.NaN;
     if (Number.isFinite(resetAtMs)) {
@@ -302,7 +314,7 @@ function projectPoolBurn(
       const elapsedHours = Math.max(0, windowHours - hoursUntilReset);
       if (elapsedHours > 0) {
         projectedFraction = Math.max(used, (used * windowHours) / elapsedHours);
-        if (elapsedHours < Math.min(BURN_LOW_CONFIDENCE_MAX_HOURS, windowHours / 7)) {
+        if (elapsedHours < cutoffHours) {
           lowConfidence = true;
         }
         const hoursToFull = used >= 1 ? 0 : used > 0 ? ((1 - used) * elapsedHours) / used : Number.POSITIVE_INFINITY;
@@ -325,7 +337,14 @@ function projectPoolBurn(
   if (included === 0 || poolCredits <= 0) {
     return null;
   }
-  return { ratio: demandCredits / poolCredits, demandCredits, poolCredits, firstExhaustion, lowConfidence };
+  return {
+    ratio: demandCredits / poolCredits,
+    demandCredits,
+    poolCredits,
+    firstExhaustion,
+    lowConfidence,
+    lowConfidenceCutoffHours,
+  };
 }
 
 function formatBurnRatio(projection: PoolBurnProjection | null): string {
@@ -335,13 +354,24 @@ function formatBurnRatio(projection: PoolBurnProjection | null): string {
   return `${projection.ratio.toFixed(2)}×`;
 }
 
-function formatBurnHours(hours: number): string {
+export function formatBurnHours(hours: number): string {
   if (hours <= 0) {
     return "now";
   }
-  const days = Math.floor(hours / 24);
-  const rest = Math.round(hours - days * 24);
-  return days > 0 ? `~${days}d ${rest}h` : `~${Math.max(1, rest)}h`;
+  // Round the total first: splitting before rounding let the remainder round
+  // up to 24 and print "~1d 24h" (gcs8/codex-lb#29).
+  const total = Math.max(1, Math.round(hours));
+  const days = Math.floor(total / 24);
+  const rest = total - days * 24;
+  return days > 0 ? `~${days}d ${rest}h` : `~${rest}h`;
+}
+
+/** Elapsed-data span for the low-confidence note: whole hours, or minutes under an hour. */
+export function formatBurnSpan(hours: number): string {
+  if (hours >= 1) {
+    return `${Math.round(hours)}h`;
+  }
+  return `${Math.max(1, Math.round(hours * 60))} min`;
 }
 
 function buildBurnTrend(points: TrendPoint[], currentValue: number | null): { value: number }[] {
@@ -812,7 +842,9 @@ export function buildDashboardView(
           : t("dashboard.stats.poolBurnNoExhaustion"),
       );
       if (headline.lowConfidence) {
-        metaParts.push(t("dashboard.stats.poolBurnLowConfidence"));
+        metaParts.push(
+          t("dashboard.stats.poolBurnLowConfidence", { span: formatBurnSpan(headline.lowConfidenceCutoffHours) }),
+        );
       }
     }
     stats.push({
