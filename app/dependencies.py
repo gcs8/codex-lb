@@ -34,6 +34,8 @@ from app.modules.dashboard_users.repository import DashboardUsersRepository
 from app.modules.dashboard_users.service import DashboardUsersService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.lb_summary.repository import LbSummaryRepository
+from app.modules.lb_summary.service import LbSummaryService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.service import ModelSourcesService
@@ -57,6 +59,18 @@ from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
+
+
+@dataclass(slots=True)
+class LbSummaryContext:
+    session: AsyncSession
+    repository: LbSummaryRepository
+    service: LbSummaryService
+
+
+async def get_lb_summary_context(session: AsyncSession = Depends(get_session)) -> LbSummaryContext:
+    repository = LbSummaryRepository(session)
+    return LbSummaryContext(session=session, repository=repository, service=LbSummaryService(repository))
 
 
 @dataclass(slots=True)

@@ -48,7 +48,7 @@ The computation SHALL use the same account scope as the API key's assigned accou
 
 ### Requirement: API key usage_sections controls which /v1/usage detail sections are returned
 
-The system SHALL store an API key's visible usage sections in a `usage_sections` TEXT field as a comma-separated list. The supported values SHALL be `upstream_limits` and `account_pool_usage`. The system SHALL parse this field when building the `/v1/usage` response and conditionally include the corresponding sections, subject to global quota privacy settings.
+The system SHALL store an API key's visible usage sections in a `usage_sections` TEXT field as a comma-separated list. The supported values SHALL be `upstream_limits`, `account_pool_usage`, and opt-in `lb_summary`. The system SHALL parse this field when building the `/v1/usage` response and conditionally include the corresponding sections, subject to global quota privacy settings. `lb_summary` SHALL authorize only the read-only summary capability and SHALL NOT be added to default or legacy-null sections.
 
 #### Scenario: Default usage_sections includes all sections
 
