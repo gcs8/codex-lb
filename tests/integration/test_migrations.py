@@ -3480,6 +3480,7 @@ async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_p
     """Upgrade adds two nullable columns without touching existing rows; downgrade
     drops them; a half-applied schema upgrades idempotently; head stays single."""
     from alembic import command
+    from alembic.script import ScriptDirectory
     from sqlalchemy import inspect as sa_inspect
 
     from app.db.migrate import _build_alembic_config
@@ -3518,6 +3519,10 @@ async def test_account_quota_tier_override_migration_upgrade_and_downgrade(tmp_p
         async with engine.connect() as conn:
             assert set(await conn.run_sync(_cols)) == names
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _HEAD_REVISION == revision
+        assert result.current_revision == _HEAD_REVISION
+        # Later revisions may stack on this one; it must stay on the single head's lineage.
+        script = ScriptDirectory.from_config(_build_alembic_config(db_url))
+        assert len(script.get_heads()) == 1
+        assert revision in {rev.revision for rev in script.iterate_revisions(script.get_heads()[0], "base")}
     finally:
         await engine.dispose()
