@@ -133,7 +133,8 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.queryByText("3h to return to schedule")).not.toBeInTheDocument();
     expect(screen.queryByText("Throttle")).not.toBeInTheDocument();
     expect(screen.getByText("Add capacity")).toBeInTheDocument();
-    expect(screen.getByText("0.061x Pro weekly pool (~1 account)")).toBeInTheDocument();
+    // 3,096 / 17,640 per Pro (was 0.061x at 50,400).
+    expect(screen.getByText("0.18x Pro weekly pool (~1 account)")).toBeInTheDocument();
     expect(screen.getByText("36% over planned usage")).toBeInTheDocument();
     expect(screen.getByText("3.1K credits over planned usage now")).toBeInTheDocument();
     expect(screen.getByText("No weekly shortfall projected at recent pace")).toBeInTheDocument();

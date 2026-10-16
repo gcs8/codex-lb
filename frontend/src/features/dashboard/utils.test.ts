@@ -481,8 +481,9 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.paceMultiplier).toBeCloseTo(4.95);
     expect(pace?.throttleToPercent).toBeCloseTo(0.25);
     expect(pace?.reduceByPercent).toBeCloseTo(99.75);
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(78.37);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(79);
+    // shortfall ~3,949,848 credits / 17,640 per Pro (10x Plus, weekly; gcs8/codex-lb#7)
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(223.92); // was 78.37 at 50,400 per Pro
+    expect(pace?.proAccountsToCoverOverPlan).toBe(224);
     expect(pace?.projectedDepletionHours).toBeCloseTo(0.34);
     expect(pace?.status).toBe("danger");
   });
@@ -505,7 +506,9 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.pauseForBreakEvenHours).toBeCloseTo(90.72);
     expect(pace?.paceMultiplier).toBeCloseTo(2.78);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(6);
+    // Same shortfall, 17,640-credit Pro (was 6 at 50,400).
+    expect(pace?.proAccountsToCoverOverPlan).toBe(18);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(Math.ceil(pace?.proAccountEquivalentToCoverOverPlan ?? 0));
     expect(pace?.status).toBe("danger");
   });
 
@@ -552,7 +555,9 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.projectedShortfallCredits).toBeCloseTo(59_999.01);
     expect(pace?.projectedDepletionHours).toBeLessThan(40);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(1);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(2);
+    // Same shortfall, 17,640-credit Pro (was 2 at 50,400).
+    expect(pace?.proAccountsToCoverOverPlan).toBe(4);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(Math.ceil(pace?.proAccountEquivalentToCoverOverPlan ?? 0));
     expect(pace?.status).toBe("danger");
   });
 
@@ -573,8 +578,9 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.paceMultiplier).toBeCloseTo(5.56);
     expect(pace?.throttleToPercent).toBeCloseTo(10);
     expect(pace?.reduceByPercent).toBeCloseTo(90);
-    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(17.86);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(18);
+    // shortfall ~900,144 credits / 17,640 per Pro (10x Plus, weekly; gcs8/codex-lb#7)
+    expect(pace?.proAccountEquivalentToCoverOverPlan).toBeCloseTo(51.02); // was 17.86 at 50,400 per Pro
+    expect(pace?.proAccountsToCoverOverPlan).toBe(52);
     expect(pace?.projectedDepletionHours).toBeCloseTo(0);
     expect(pace?.status).toBe("danger");
   });
@@ -660,7 +666,9 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.throttleToPercent).toBeGreaterThanOrEqual(0);
     expect(pace?.reduceByPercent).toBeGreaterThan(0);
     expect(pace?.proAccountEquivalentToCoverOverPlan).toBeGreaterThan(0);
-    expect(pace?.proAccountsToCoverOverPlan).toBe(1);
+    // Same shortfall, 17,640-credit Pro (was 1 at 50,400).
+    expect(pace?.proAccountsToCoverOverPlan).toBe(2);
+    expect(pace?.proAccountsToCoverOverPlan).toBe(Math.ceil(pace?.proAccountEquivalentToCoverOverPlan ?? 0));
     expect(pace?.projectedMinimumRemainingCredits).toBeCloseTo(0);
     expect(pace?.status).toBe("danger");
   });

@@ -5,8 +5,8 @@ import type { WeeklyCreditPace, WeeklyCreditRunwayStatus } from "@/features/dash
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber, formatDateTimeInline, formatModelLabel } from "@/utils/formatters";
+import { PRO_WEEKLY_CAPACITY_CREDITS } from "@/features/dashboard/capacity";
 
-const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 export type WeeklyCreditsPaceCardProps = {
   pace: WeeklyCreditPace | null;

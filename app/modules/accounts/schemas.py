@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field, PrivateAttr, field_validator
+from pydantic import Field, PrivateAttr, StrictFloat, StrictInt, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -199,10 +199,10 @@ class AccountLimitWarmupUpdateResponse(DashboardModel):
 class AccountQuotaTierUpdateRequest(DashboardModel):
     # x Plus monthly quota (Plus 1, Pro 100 5, Pro 200 10, grandfathered Pro 200 20, Pro 500 25).
     # null clears the override and returns the account to its plan default.
-    quota_tier_multiplier: float | None = Field(default=None, ge=0.1, le=100.0)
+    quota_tier_multiplier: StrictFloat | StrictInt | None = Field(default=None, ge=0.1, le=100.0)
     # Alternative: the raw monthly credit allowance (7,560 = Plus). Set at most one
     # of quota_tier_multiplier / quota_monthly_credits; both null clears.
-    quota_monthly_credits: float | None = Field(default=None, ge=1.0, le=7_560_000.0)
+    quota_monthly_credits: StrictFloat | StrictInt | None = Field(default=None, ge=1.0, le=7_560_000.0)
     # Optional: the plan default applies again from this instant (e.g. a grandfathered
     # allowance ending). Must be in the future when set.
     quota_tier_multiplier_expires_at: datetime | None = None

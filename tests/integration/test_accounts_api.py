@@ -840,3 +840,11 @@ async def test_account_quota_tier_raw_monthly_credits(async_client):
     assert cleared.status_code == 200
     assert cleared.json()["quotaMonthlyCredits"] is None
     assert cleared.json()["effectiveQuotaTierMultiplier"] == 5
+
+
+@pytest.mark.asyncio
+async def test_account_quota_tier_rejects_boolean_and_string_amounts(async_client):
+    """JSON true/"20" must not coerce into a tier (review on PR #8)."""
+    for body in ({"quotaTierMultiplier": True}, {"quotaMonthlyCredits": True}, {"quotaTierMultiplier": "20"}):
+        response = await async_client.put("/api/accounts/does-not-exist/quota-tier", json=body)
+        assert response.status_code in (400, 422), body

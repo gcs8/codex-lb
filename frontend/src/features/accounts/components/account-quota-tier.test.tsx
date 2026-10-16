@@ -42,7 +42,7 @@ describe("AccountQuotaTier", () => {
         return HttpResponse.json({
           accountId: "acc_tier",
           quotaTierMultiplier: 20,
-          quotaTierMultiplierExpiresAt: "2026-10-30T00:00:00Z",
+          quotaTierMultiplierExpiresAt: "2026-10-30T07:00:00Z",
           planQuotaTierMultiplier: 10,
           effectiveQuotaTierMultiplier: 20,
         });
@@ -53,16 +53,20 @@ describe("AccountQuotaTier", () => {
     await user.click(screen.getByRole("button", { name: "20×" }));
     const date = screen.getByLabelText("Override ends");
     await user.clear(date);
-    await user.type(date, "2026-10-30");
+    await user.type(date, "2026-10-29");
+    // "Through Oct 29" = end of that day in Pacific (PDT) = 07:00Z on Oct 30.
+    expect(screen.getByTestId("account-quota-tier-ends")).toHaveTextContent(
+      "Ends after 2026-10-29 (America/Los_Angeles) · 2026-10-30T07:00:00Z",
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(body).toHaveBeenCalledTimes(1));
     expect(body).toHaveBeenCalledWith({
       quotaTierMultiplier: 20,
       quotaMonthlyCredits: null,
-      quotaTierMultiplierExpiresAt: "2026-10-30T00:00:00.000Z",
+      quotaTierMultiplierExpiresAt: "2026-10-30T07:00:00.000Z",
     });
-    expect(onSave).toHaveBeenCalledWith("acc_tier", { kind: "multiplier", value: 20 }, "2026-10-30T00:00:00.000Z");
+    expect(onSave).toHaveBeenCalledWith("acc_tier", { kind: "multiplier", value: 20 }, "2026-10-30T07:00:00.000Z");
   });
 
   it("clears an existing override back to the plan default", async () => {

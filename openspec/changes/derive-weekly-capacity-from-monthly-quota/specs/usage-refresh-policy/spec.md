@@ -23,12 +23,12 @@ The system MUST recognize account plan types returned by upstream ChatGPT auth a
 
 ### Requirement: Per-account subscription tier override
 
-The system MUST let an operator with account write permission set an optional per-account tier override with an optional end time, through `PUT /api/accounts/{account_id}/quota-tier`, either as a multiplier of the Plus monthly quota (between 0.1 and 100) or as a raw monthly credit allowance (between 1 and 7,560,000), which is treated as `credits / 7560` x Plus. Setting both in one request MUST be rejected with HTTP 400. While the override is active the account's weekly capacity MUST be `7560 x override x 7 / 30` and its 5 h capacity MUST scale by `override / plan multiplier`. After the end time, or when the override is cleared with `null`, the plan-derived capacity MUST apply. An override MUST NOT make a window applicable that the plan does not have. Account summaries MUST report the override, its end time, the plan multiplier, the effective multiplier and the effective monthly credits.
+The system MUST let an operator with account write permission set an optional per-account tier override with an optional end time, through `PUT /api/accounts/{account_id}/quota-tier`, either as a multiplier of the Plus monthly quota (between 0.1 and 100) or as a raw monthly credit allowance (between 1 and 7,560,000), which is treated as `credits / 7560` x Plus. Setting both in one request MUST be rejected with HTTP 400. While the override is active the account's weekly capacity MUST be `7560 x override x 7 / 30` and its 5 h capacity MUST scale by `override / plan multiplier`. After the end time, or when the override is cleared with `null`, the plan-derived capacity MUST apply. An override MUST NOT make a window applicable that the plan does not have. The dashboard MUST interpret a picked end date as inclusive, ending at 00:00 of the following day in `America/Los_Angeles` (OpenAI's day boundary), and MUST show the resulting UTC instant before saving. Account summaries MUST report the override, its end time, the plan multiplier, the effective multiplier and the effective monthly credits.
 
 #### Scenario: Grandfathered Pro 200 until a date
 
 - **GIVEN** an account whose stored `plan_type` is `pro`
-- **WHEN** an operator sets its tier multiplier to `20` ending `2026-10-30T00:00:00Z`
+- **WHEN** an operator sets its tier multiplier to `20` through 2026-10-29 Pacific, i.e. ending `2026-10-30T07:00:00Z`
 - **THEN** before that time the account contributes `35280.0` weekly capacity
 - **AND** from that time it contributes the plan's `17640.0`
 

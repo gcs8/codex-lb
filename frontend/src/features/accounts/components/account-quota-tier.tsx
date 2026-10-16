@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { AccountQuotaTierOverride } from "@/features/accounts/api";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { coveredDateInZone, DEFAULT_OVERRIDE_TIME_ZONE, endOfDayInZoneIso } from "@/features/accounts/end-of-day";
 import { formatCompactNumber } from "@/utils/formatters";
 
 // OpenAI advertises plans as a multiple of the $20 Plus plan (7,560 credits / month):
@@ -15,9 +16,6 @@ const TIER_PRESETS = [1, 5, 10, 20, 25] as const;
 
 type Mode = "multiplier" | "monthlyCredits";
 
-function toDateInput(iso: string | null | undefined): string {
-  return iso ? iso.slice(0, 10) : "";
-}
 
 export type AccountQuotaTierSave = (
   accountId: string,
@@ -44,14 +42,14 @@ export function AccountQuotaTier({ account, disabled = false, onSave }: AccountQ
   const [credits, setCredits] = useState<string>(
     account.quotaMonthlyCredits != null ? String(account.quotaMonthlyCredits) : "",
   );
-  const [expires, setExpires] = useState<string>(toDateInput(account.quotaTierMultiplierExpiresAt));
+  const [expires, setExpires] = useState<string>(coveredDateInZone(account.quotaTierMultiplierExpiresAt));
 
   const save = (value: AccountQuotaTierOverride) => {
     setPending(true);
     void onSave(
       account.accountId,
       value,
-      value != null && expires ? new Date(`${expires}T00:00:00Z`).toISOString() : null,
+      value != null && expires ? endOfDayInZoneIso(expires) : null,
     )
       .catch(() => undefined)
       .finally(() => setPending(false));
@@ -177,6 +175,15 @@ export function AccountQuotaTier({ account, disabled = false, onSave }: AccountQ
           ) : null}
         </div>
       </div>
+      {parsed != null && expires && endOfDayInZoneIso(expires) ? (
+        <p className="text-xs tabular-nums text-muted-foreground" data-testid="account-quota-tier-ends">
+          {t("accounts.quotaTier.endsAt", {
+            date: expires,
+            zone: DEFAULT_OVERRIDE_TIME_ZONE,
+            utc: (endOfDayInZoneIso(expires) ?? "").replace(".000Z", "Z"),
+          })}
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">{t("accounts.quotaTier.help")}</p>
     </div>
   );
