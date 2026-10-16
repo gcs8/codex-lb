@@ -703,6 +703,8 @@ The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key
 
 Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
 
+After weekly-only normalization, primary and monthly aggregate samples whose known `reset_at` is at or before the current time MUST be projected as zero usage with no reset deadline, without rewriting or deleting historical rows. Duration and capacity MUST remain unchanged by this projection. Samples with no known reset MUST retain their existing meaning. A window with no remaining reset deadline MUST be omitted from aggregate limits. Secondary samples MUST retain their existing raw aggregation and pooled-credit behavior; this projection MUST NOT change quota admission, assignment scopes, section visibility or key-specific usage and configured limits.
+
 #### Scenario: Missing API key is rejected
 
 - **WHEN** a client calls `GET /v1/usage` without a Bearer token
@@ -741,6 +743,25 @@ Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` 
 
 - **WHEN** `api_key_auth_enabled` is false and a client calls `GET /v1/usage` with a valid Bearer key
 - **THEN** the system still authenticates that key and returns the self-usage payload
+
+#### Scenario: Silent primary or monthly sample cannot poison a live aggregate reset
+
+- **GIVEN** one account has an elapsed primary or monthly reset and another has a future reset in that window
+- **WHEN** the client reads visible aggregate limits
+- **THEN** the window uses the future reset and only live samples contribute used credits
+- **AND** the elapsed sample retains its capacity and its stored historical values
+
+#### Scenario: All primary or monthly samples have elapsed
+
+- **WHEN** every known reset in a primary or monthly aggregate window is at or before now
+- **THEN** that window is omitted rather than receiving an invented reset
+
+#### Scenario: Weekly-only history does not create a short window
+
+- **GIVEN** an account reports a weekly window in the primary slot
+- **WHEN** the aggregate normalizes and projects historical rows
+- **THEN** the row remains secondary and does not create a primary limit
+- **AND** an exhausted elapsed weekly sample is not made free by aggregate expiration
 
 ### Requirement: API key cost accounting uses the billable service tier
 API key cost accounting MUST continue to use the effective billable `service_tier` chosen for the request log and MUST NOT derive pricing from the operator-requested tier when the upstream reports a different actual tier.
