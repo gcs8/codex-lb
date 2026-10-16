@@ -132,6 +132,22 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
   });
 
+  it("keeps the reported tier in the model label when no tier was requested", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          { ...LAYOUT_REQUEST, reasoningEffort: "high", serviceTier: "default", actualServiceTier: "default" },
+        ]}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
+    expect(screen.queryByText(/Upstream reported/)).not.toBeInTheDocument();
+  });
+
   it("renders only selected headers and matching row cells", () => {
     render(
       <RecentRequestsTable
@@ -318,8 +334,11 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "Plus" })).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
-    expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
-    expect(screen.getByText("Requested priority")).toBeInTheDocument();
+    // The subscription backend echoes `default` even when priority is applied (#34), so the
+    // label carries the requested tier and the echo is shown as what upstream reported.
+    expect(screen.getByText("gpt-5.1 (high, priority)")).toBeInTheDocument();
+    expect(screen.getByText("Upstream reported default")).toBeInTheDocument();
+    expect(screen.queryByText("gpt-5.1 (high, default)")).not.toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
     expect(screen.getByText("Up Auto")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
@@ -329,6 +348,7 @@ describe("RecentRequestsTable", () => {
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByText("Request Details")).toBeInTheDocument();
     expect(within(dialog).getByText("req-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("gpt-5.1 (high, priority)")).toBeInTheDocument();
     expect(within(dialog).getByTestId("request-archive-panel")).toHaveTextContent("Archive for archive-req-1");
     expect(within(dialog).getByText("rate_limit_exceeded")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
