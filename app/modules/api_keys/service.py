@@ -97,6 +97,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         traffic_class: str | _Unset = ...,
         transport_policy_override: str | None | _Unset = ...,
         thread_cache_identity_override: str | None | _Unset = ...,
+        allow_reset_credit_redeem: bool | _Unset = ...,
         usage_sections: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
         source_assignment_scope_enabled: bool | _Unset = ...,
@@ -289,6 +290,7 @@ class ApiKeyCreateData:
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
+    allow_reset_credit_redeem: bool = False
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
@@ -318,6 +320,8 @@ class ApiKeyUpdateData:
     transport_policy_override_set: bool = False
     thread_cache_identity_override: str | None = None
     thread_cache_identity_override_set: bool = False
+    allow_reset_credit_redeem: bool = False
+    allow_reset_credit_redeem_set: bool = False
     usage_sections: str | None = None
     usage_sections_set: bool = False
     expires_at: datetime | None = None
@@ -351,6 +355,7 @@ class ApiKeyData:
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
+    allow_reset_credit_redeem: bool = False
     usage_sections: str = "upstream_limits,account_pool_usage"
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
@@ -518,6 +523,7 @@ class ApiKeysService:
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
             thread_cache_identity_override=thread_cache_identity_override,
+            allow_reset_credit_redeem=payload.allow_reset_credit_redeem,
             usage_sections=usage_sections,
             expires_at=expires_at,
             is_active=True,
@@ -738,6 +744,9 @@ class ApiKeysService:
                 traffic_class=traffic_class_update,
                 transport_policy_override=transport_policy_override_update,
                 thread_cache_identity_override=thread_cache_identity_override_update,
+                allow_reset_credit_redeem=(
+                    payload.allow_reset_credit_redeem if payload.allow_reset_credit_redeem_set else _UNSET
+                ),
                 usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 source_assignment_scope_enabled=source_assignment_scope_enabled,
@@ -794,6 +803,7 @@ class ApiKeysService:
             or payload.traffic_class_set
             or payload.transport_policy_override_set
             or payload.thread_cache_identity_override_set
+            or payload.allow_reset_credit_redeem_set
             or payload.usage_sections_set
             or payload.expires_at_set
             or payload.is_active_set
@@ -1875,6 +1885,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         traffic_class=data.traffic_class,
         transport_policy_override=data.transport_policy_override,
         thread_cache_identity_override=data.thread_cache_identity_override,
+        allow_reset_credit_redeem=data.allow_reset_credit_redeem,
         usage_sections=data.usage_sections,
         expires_at=data.expires_at,
         is_active=data.is_active,
@@ -1918,6 +1929,7 @@ def _to_api_key_data(
         thread_cache_identity_override=_normalize_thread_cache_identity_override_lenient(
             getattr(row, "thread_cache_identity_override", None)
         ),
+        allow_reset_credit_redeem=row.allow_reset_credit_redeem,
         usage_sections=_get_usage_sections_with_default(row),
         expires_at=row.expires_at,
         is_active=row.is_active,

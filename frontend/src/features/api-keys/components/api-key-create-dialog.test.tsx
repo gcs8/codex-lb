@@ -11,6 +11,19 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
 describe("ApiKeyCreateDialog", () => {
+  it("defaults redemption off and submits explicit permission", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(<ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const permission = screen.getByRole("checkbox", { name: "Allow reset-credit redemption" });
+    expect(permission).not.toBeChecked();
+    await user.type(screen.getByLabelText("Name"), "Reader");
+    await user.click(permission);
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].allowResetCreditRedeem).toBe(true);
+  });
+
   it("labels the reasoning effort trigger with its field and state", () => {
     renderWithProviders(
       <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />,

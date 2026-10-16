@@ -58,6 +58,7 @@ export const ApiKeySchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .default(null),
+  allowResetCreditRedeem: z.boolean().default(false),
   usageSections: z.string().default("upstream_limits,account_pool_usage"),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
@@ -95,6 +96,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  allowResetCreditRedeem: z.boolean().optional(),
   usageSections: z.string().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -120,6 +122,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  allowResetCreditRedeem: z.boolean().optional(),
   usageSections: z.string().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
