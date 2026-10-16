@@ -66,6 +66,7 @@ nav:
   - Authentication: authentication.md
   - Company Sign-In: sso.md
   - API Keys: api-keys.md
+  - LB Summary: lb-summary.md
   - Routing: routing.md
   - Database: database.md
   - Deployment:

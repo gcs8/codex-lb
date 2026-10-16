@@ -1,7 +1,7 @@
 # Read-only LB summary
 
-Owner capabilities: [key-lb-summary](../openspec/specs/key-lb-summary/spec.md) and
-[usage sections](../openspec/specs/account-pool-usage-v1-usage/spec.md).
+Owner capabilities: [key-lb-summary](https://github.com/gcs8/codex-lb/tree/ryoko/integration/openspec/specs/key-lb-summary) and
+[usage sections](https://github.com/gcs8/codex-lb/tree/ryoko/integration/openspec/specs/account-pool-usage-v1-usage).
 
 `GET /v1/lb/summary` accepts a normal proxy API key in `Authorization: Bearer …`.
 Dashboard sessions do not authorize it. It requires an explicit `lb_summary` entry
