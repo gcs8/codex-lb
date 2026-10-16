@@ -135,6 +135,41 @@ describe("AccountQuotaTier", () => {
     expect(screen.getByLabelText("Monthly credits")).toHaveValue("45360");
   });
 
+  it("drops the previous account's draft when the selected account changes (#28)", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(updateAccountQuotaTier);
+    const grandfathered = createAccountSummary({
+      accountId: "acc_pro_20x",
+      planType: "pro",
+      planQuotaTierMultiplier: 10,
+      quotaTierMultiplier: 20,
+      effectiveQuotaTierMultiplier: 20,
+      quotaTierMultiplierExpiresAt: "2026-10-30T07:00:00Z",
+    });
+    const lite = createAccountSummary({
+      accountId: "acc_lite",
+      planType: "prolite",
+      planQuotaTierMultiplier: 5,
+      quotaTierMultiplier: null,
+      quotaTierMultiplierExpiresAt: null,
+      effectiveQuotaTierMultiplier: 5,
+    });
+    const { rerender } = render(<AccountQuotaTier account={grandfathered} onSave={onSave} />);
+    expect(screen.getByLabelText("Tier multiplier")).toHaveValue("20");
+    expect(screen.getByLabelText("Override ends")).toHaveValue("2026-10-29");
+    // An unsaved edit on the first account must not survive the switch either.
+    await user.clear(screen.getByLabelText("Tier multiplier"));
+    await user.type(screen.getByLabelText("Tier multiplier"), "25");
+
+    rerender(<AccountQuotaTier account={lite} onSave={onSave} />);
+
+    expect(screen.getByLabelText("Tier multiplier")).toHaveValue("");
+    expect(screen.getByLabelText("Override ends")).toHaveValue("");
+    expect(screen.getByLabelText("Tier multiplier")).toHaveAttribute("placeholder", "plan: 5×");
+    expect(screen.queryByRole("button", { name: "Use plan default" })).not.toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("blocks saving an out-of-range multiplier", async () => {
     const user = userEvent.setup();
     renderTier();

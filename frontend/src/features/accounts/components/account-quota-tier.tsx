@@ -29,7 +29,14 @@ export type AccountQuotaTierProps = {
   onSave: AccountQuotaTierSave;
 };
 
-export function AccountQuotaTier({ account, disabled = false, onSave }: AccountQuotaTierProps) {
+export function AccountQuotaTier(props: AccountQuotaTierProps) {
+  // The detail panel is one instance that receives a different account when the
+  // selection changes; keying the editor by account discards the previous
+  // account's draft instead of saving it onto the new one (gcs8/codex-lb#28).
+  return <AccountQuotaTierEditor key={props.account.accountId} {...props} />;
+}
+
+function AccountQuotaTierEditor({ account, disabled = false, onSave }: AccountQuotaTierProps) {
   const { t } = useTranslation();
   const [pending, setPending] = useState(false);
   const planMultiplier = account.planQuotaTierMultiplier ?? null;
