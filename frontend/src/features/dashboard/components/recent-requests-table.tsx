@@ -279,6 +279,18 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
   return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
 }
 
+// The ChatGPT subscription backend echoes `default` even when a priority request is applied
+// (#34), so when the request asked for a different tier, label it with the request and show
+// the echo as what upstream reported rather than as the served tier.
+function serviceTierLabel(request: RequestLog): { labelTier: string | null; reportedTier: string | null } {
+  const reported = request.actualServiceTier ?? request.serviceTier;
+  const requested = request.requestedServiceTier;
+  if (requested && requested !== reported) {
+    return { labelTier: requested, reportedTier: reported };
+  }
+  return { labelTier: reported, reportedTier: null };
+}
+
 function formatGenerationSpeed(request: RequestLog): string | null {
   if (request.outputTokensRaw == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
     return null;
@@ -415,9 +427,7 @@ export function RecentRequestsTable({
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorPreview = request.errorMessage || request.errorCode || "-";
               const hasError = !!(request.errorCode || request.errorMessage);
-              const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
-              const showRequestedTier =
-                !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
+              const { labelTier, reportedTier } = serviceTierLabel(request);
               const planType = request.planType?.trim().toLowerCase() || null;
               const planLabel = planType ? formatSlug(planType) : "--";
               const upstreamTransport = request.upstreamTransport;
@@ -456,16 +466,16 @@ export function RecentRequestsTable({
                   {isColumnVisible("model") ? <TableCell className="truncate align-top">
                     <div className="leading-tight">
                       <span className="font-mono text-xs">
-                        {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
+                        {formatModelLabel(request.model, request.reasoningEffort, labelTier)}
                       </span>
                       {request.requestKind === "warmup" || request.requestKind === "limit_warmup" ? (
                         <div className="mt-1 text-xs text-muted-foreground">
                           {REQUEST_KIND_LABELS.warmup}
                         </div>
                       ) : null}
-                      {showRequestedTier ? (
+                      {reportedTier ? (
                         <div className="text-[11px] text-muted-foreground">
-                          {t("dashboard.requests.requestedTier", { tier: request.requestedServiceTier })}
+                          {t("dashboard.requests.upstreamReportedTier", { tier: reportedTier })}
                         </div>
                       ) : null}
                     </div>
@@ -596,7 +606,7 @@ export function RecentRequestsTable({
               />
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.status")} value={selectedRequest ? t(`dashboard.requestStatus.${selectedRequest.status}`, { defaultValue: REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status }) : "—"} />
-                <RequestDetailField label={t("dashboard.requests.columns.model")} value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
+                <RequestDetailField label={t("dashboard.requests.columns.model")} value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, serviceTierLabel(selectedRequest).labelTier) : "—"} mono />
                 <RequestDetailField label={t("dashboard.requestDetails.requestKind")} value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label={t("dashboard.requests.columns.plan")} value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.elapsed")} value={formatElapsed(selectedRequest?.latencyMs ?? null)} />

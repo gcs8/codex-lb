@@ -790,7 +790,7 @@
   "dashboard.requests.emptyFilteredDescription": "No request logs match the current filters.",
   "dashboard.requests.emptyFilteredTitle": "No matching requests",
   "dashboard.requests.emptyTitle": "No requests yet",
-  "dashboard.requests.requestedTier": "Requested {{tier}}",
+  "dashboard.requests.upstreamReportedTier": "Upstream reported {{tier}}",
   "dashboard.requests.reasoningTokensShort": "{{count}} reasoning",
   "dashboard.requests.resizeColumn": "Resize {{column}} column",
   "dashboard.requests.unassigned": "Unassigned",

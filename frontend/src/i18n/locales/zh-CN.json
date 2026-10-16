@@ -790,7 +790,7 @@
   "dashboard.requests.emptyFilteredDescription": "没有符合当前筛选条件的 request log。",
   "dashboard.requests.emptyFilteredTitle": "没有匹配的请求",
   "dashboard.requests.emptyTitle": "暂无请求",
-  "dashboard.requests.requestedTier": "请求 {{tier}}",
+  "dashboard.requests.upstreamReportedTier": "上游报告 {{tier}}",
   "dashboard.requests.reasoningTokensShort": "推理 {{count}}",
   "dashboard.requests.resizeColumn": "调整“{{column}}”列宽",
   "dashboard.requests.unassigned": "未分配",
