@@ -430,7 +430,7 @@ jobs:
   test-integration-core:
     name: Tests (pytest, integration-core-${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     needs: changes
     strategy:
       fail-fast: false
@@ -475,8 +475,32 @@ jobs:
           enable-cache: true
           prune-cache: true
 
+      - name: Install pinned Rust toolchain
+        if: needs.changes.outputs.backend == 'true'
+        run: rustup toolchain install 1.96.0 --profile minimal
+
+      - name: Cache Cargo downloads
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # The issue-1304 wire regressions in integration-core run against the real
+      # native helper (they assert it rather than skip), so build it here too.
+      - name: Build native egress helper
+        if: needs.changes.outputs.backend == 'true'
+        run: cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
+
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
+        env:
+          CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress
         run: make test-integration-core-${{ matrix.shard }}
 
   # Aggregate for the shards above. Keep this exact job name: the repository
