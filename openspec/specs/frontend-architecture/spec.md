@@ -1617,6 +1617,16 @@ The dashboard SHALL load translations through `i18next` + `react-i18next`, suppo
 - **WHEN** the user reloads the dashboard after selecting a language
 - **THEN** the previously selected language is reapplied before the first paint
 
+### Requirement: Appearance names the pool burn projection
+
+The Appearance settings burn-projection row SHALL name the Pool burn projection and describe projected demand versus pool capacity in English, Korean, and Simplified Chinese. Its switch accessible name SHALL use the same pool terminology. The existing `accountBurnrateEnabled` preference and `codex-lb-account-burnrate-enabled` storage key SHALL remain unchanged.
+
+#### Scenario: Localized pool projection preference
+
+- **WHEN** a user opens Appearance settings in `en`, `ko`, or `zh-CN`
+- **THEN** the burn-projection label, description, and switch accessible name refer to the pool rather than account-equivalent demand
+- **AND** toggling the switch persists the boolean under `codex-lb-account-burnrate-enabled`
+
 ### Requirement: Settings page renders in the active locale
 
 The Settings page and its constituent sections (`Appearance`, `Routing`, `Import`, `Session`, `Password`, `TOTP`) SHALL render all user-visible strings — page title and subtitle, section headings and descriptions, switch and select labels, button labels, dialog titles and descriptions, validation messages, warning banners, and toast messages — through the active i18n locale. Selecting `zh-CN` MUST translate the entire surface above to Simplified Chinese, with the explicit exceptions of the embedded `ApiKeysSection`, `FirewallSection`, `QuotaPlannerSection`, `StickySessionsSection`, and `UpstreamProxySettings` rendered inside Settings, which belong to other capabilities and remain English until their own migrations.
