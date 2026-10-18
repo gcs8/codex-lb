@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    # `ryoko/integration` is this fork's build/deploy branch. Every push to it
+    # (batch merges, direct pushes) runs the full suite: the force step in the
+    # `changes` job treats all push events as full-suite, so path filters never
+    # skip backend tests on the composed tip. See #37.
+    branches: ["main", "ryoko/integration"]
   # No `edited`: a PR title/body edit (agents finalizing descriptions, review
   # bots rewriting summaries) must not cancel the in-flight matrix and re-queue
   # ~30 jobs for an unchanged head. The only jobs that read PR metadata are the
@@ -17,7 +21,11 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR runs for a superseded head are cancelled. Push runs on the fork build
+  # branch are not: an in-flight run always finishes so the tip that was
+  # deployed has a complete result. GitHub still keeps only the newest
+  # pending run per group, so a burst of pushes tests the newest tip.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}
 
 permissions:
   contents: read
@@ -25,7 +33,8 @@ permissions:
 
 jobs:
   # Detect changed areas so PRs can skip unrelated expensive jobs.
-  # Pushes to main and merge queue events still run the full suite.
+  # Pushes (main and ryoko/integration) and merge queue events still run the
+  # full suite.
   changes:
     name: Detect changes
     runs-on: ubuntu-24.04

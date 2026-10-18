@@ -130,7 +130,7 @@ def test_ci_matrix_does_not_restart_on_pr_metadata_edits() -> None:
     # ci.yml cancels the in-flight run per ref, so any extra trigger type
     # restarts ~30 jobs for an unchanged head. `edited` (title/body PATCH by
     # agents and review bots) must therefore never be a ci.yml trigger.
-    assert "cancel-in-progress: true" in workflow
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}" in workflow
     assert _pull_request_trigger_types(workflow) == {"opened", "reopened", "synchronize", "ready_for_review"}
 
     # The PR-body-dependent release guards live in release-guards.yml, and the
@@ -168,3 +168,27 @@ def test_integration_core_shards_build_and_export_the_native_helper() -> None:
     assert (
         "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"
     ) in shard_job
+
+
+def test_fork_build_branch_push_runs_full_suite_without_cancellation() -> None:
+    """#37: pushes to ryoko/integration must run every job with no path-filter skips."""
+    workflow = _ci_workflow_text()
+    trigger_block = workflow.split("concurrency:", maxsplit=1)[0]
+    push_block = trigger_block.split("  push:", maxsplit=1)[1].split("  pull_request:", maxsplit=1)[0]
+    branches = re.search(r"^    branches: \[(?P<branches>[^\]]*)\]$", push_block, re.MULTILINE)
+    assert branches is not None
+    assert {item.strip().strip('"') for item in branches.group("branches").split(",")} == {
+        "main",
+        "ryoko/integration",
+    }
+
+    changes_job = _job_block(workflow, "changes")
+    # Every push event forces the full suite, so the filter step never runs on push.
+    assert 'if [[ "${{ github.event_name }}" == "push" ||' in changes_job
+    assert "if: steps.force.outputs.full_suite != 'true'" in changes_job
+    for area in ("frontend", "backend", "rust", "helm", "docker", "migrations", "nix"):
+        assert f"{area}: ${{{{ steps.force.outputs.full_suite || steps.filter.outputs.{area} }}}}" in changes_job
+
+    # In-flight push runs on the build branch are never cancelled by a newer push.
+    concurrency_block = workflow.split("concurrency:", maxsplit=1)[1].split("permissions:", maxsplit=1)[0]
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}" in concurrency_block

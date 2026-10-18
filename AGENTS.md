@@ -20,6 +20,14 @@ The contributor may be using CodexLB to run this agent. Use isolated test state 
 
 Before importing the app for tests, set `CODEX_LB_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_URL` to the same dedicated disposable database. Verify foreground, background and fixture engines before any reset. Rehearse migrations against a consistent snapshot or restored backup, preserving the original data and keys. Keep secrets and request contents out of logs and published evidence.
 
+## Fork build branch (`ryoko/integration`)
+
+In the `gcs8/codex-lb` fork, `main` tracks upstream and `ryoko/integration` is the branch that gets built and deployed. Treat it like a default branch:
+
+- Land everything through a PR against `ryoko/integration`. Upstream syncs land as one PR per batch, titled `integrate: batch NNN (#a #b #c)`, with the merged PR list in the body. No direct pushes except an owner-ordered emergency, which is named in the commit message and followed by an issue.
+- Merge one PR at a time. Before merging, rebase or update the branch onto the current `ryoko/integration` tip and wait for CI on that exact head. Two lanes that were each green against an older base can still break the combined tip (#7 x #12, fixed by #17).
+- Every push to `ryoko/integration` runs the full CI suite with no path-filter skips (`.github/workflows/ci.yml`, #37). Before deploying, confirm that the push run for the exact tip SHA is green; a skipped backend job is not a pass.
+
 ## Code Conventions
 
 The `/project-conventions` skill is auto-activated on code edits (PreToolUse guard).
