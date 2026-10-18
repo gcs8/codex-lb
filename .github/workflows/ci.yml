@@ -20,12 +20,13 @@ on:
   merge_group:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # PR runs for a superseded head are cancelled. Push runs on the fork build
-  # branch are not: an in-flight run always finishes so the tip that was
-  # deployed has a complete result. GitHub still keeps only the newest
-  # pending run per group, so a burst of pushes tests the newest tip.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}
+  # PR and main runs for a superseded head are cancelled per ref. Each push to
+  # the fork build branch gets its own group keyed by commit SHA, so no push
+  # run is cancelled or replaced by a newer one: GitHub keeps only one pending
+  # run per group, and a shared group would drop the middle SHA of a burst of
+  # three pushes. Every pushed tip gets a complete result (#37).
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/ryoko/integration' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

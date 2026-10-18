@@ -130,7 +130,7 @@ def test_ci_matrix_does_not_restart_on_pr_metadata_edits() -> None:
     # ci.yml cancels the in-flight run per ref, so any extra trigger type
     # restarts ~30 jobs for an unchanged head. `edited` (title/body PATCH by
     # agents and review bots) must therefore never be a ci.yml trigger.
-    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}" in workflow
+    assert "cancel-in-progress: true" in workflow
     assert _pull_request_trigger_types(workflow) == {"opened", "reopened", "synchronize", "ready_for_review"}
 
     # The PR-body-dependent release guards live in release-guards.yml, and the
@@ -189,6 +189,9 @@ def test_fork_build_branch_push_runs_full_suite_without_cancellation() -> None:
     for area in ("frontend", "backend", "rust", "helm", "docker", "migrations", "nix"):
         assert f"{area}: ${{{{ steps.force.outputs.full_suite || steps.filter.outputs.{area} }}}}" in changes_job
 
-    # In-flight push runs on the build branch are never cancelled by a newer push.
+    # Each build-branch push has its own concurrency group (keyed by SHA), so a
+    # newer push neither cancels a running push run nor replaces a pending one.
     concurrency_block = workflow.split("concurrency:", maxsplit=1)[1].split("permissions:", maxsplit=1)[0]
-    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/ryoko/integration' }}" in concurrency_block
+    assert (
+        "group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/ryoko/integration' && github.sha || github.ref }}"
+    ) in concurrency_block
