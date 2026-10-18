@@ -168,3 +168,30 @@ def test_integration_core_shards_build_and_export_the_native_helper() -> None:
     assert (
         "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"
     ) in shard_job
+
+
+def test_fork_build_branch_push_runs_full_suite_without_cancellation() -> None:
+    """#37: pushes to ryoko/integration must run every job with no path-filter skips."""
+    workflow = _ci_workflow_text()
+    trigger_block = workflow.split("concurrency:", maxsplit=1)[0]
+    push_block = trigger_block.split("  push:", maxsplit=1)[1].split("  pull_request:", maxsplit=1)[0]
+    branches = re.search(r"^    branches: \[(?P<branches>[^\]]*)\]$", push_block, re.MULTILINE)
+    assert branches is not None
+    assert {item.strip().strip('"') for item in branches.group("branches").split(",")} == {
+        "main",
+        "ryoko/integration",
+    }
+
+    changes_job = _job_block(workflow, "changes")
+    # Every push event forces the full suite, so the filter step never runs on push.
+    assert 'if [[ "${{ github.event_name }}" == "push" ||' in changes_job
+    assert "if: steps.force.outputs.full_suite != 'true'" in changes_job
+    for area in ("frontend", "backend", "rust", "helm", "docker", "migrations", "nix"):
+        assert f"{area}: ${{{{ steps.force.outputs.full_suite || steps.filter.outputs.{area} }}}}" in changes_job
+
+    # Each build-branch push has its own concurrency group (keyed by SHA), so a
+    # newer push neither cancels a running push run nor replaces a pending one.
+    concurrency_block = workflow.split("concurrency:", maxsplit=1)[1].split("permissions:", maxsplit=1)[0]
+    assert (
+        "group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/ryoko/integration' && github.sha || github.ref }}"
+    ) in concurrency_block
