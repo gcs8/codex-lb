@@ -7,7 +7,6 @@ from typing import Any, cast
 
 import pytest
 
-from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import inject_sse_keepalives
 from app.modules.proxy import api
 
@@ -75,30 +74,29 @@ async def test_startup_guard_stops_active_read_before_closing_inner_stream(monke
     exited = asyncio.Event()
     keepalive = asyncio.Event()
 
+    real_timeout = asyncio.timeout
+    timers: list[asyncio.Timeout] = []
+
+    def capture_timeout(delay: float | None) -> asyncio.Timeout:
+        timer = real_timeout(delay)
+        timers.append(timer)
+        return timer
+
     async def owner() -> AsyncIterator[str]:
         try:
             reading.set()
+            # Expire the injector's real idle timer only after its owned read
+            # starts. A TimeoutError raised by the source is now terminal.
+            timers[-1].reschedule(asyncio.get_running_loop().time() - 1)
             await asyncio.Event().wait()
             yield "unreachable"
         finally:
             exited.set()
 
     source = owner()
-    # Advance the injector to its heartbeat yield using a causal timeout seam,
-    # not a wall-clock sleep. Its owned next task still drives the source.
-    first_wait = True
-
-    async def heartbeat_wait(shared, *, timeout=None, **kwargs):
-        nonlocal first_wait
-        if first_wait:
-            first_wait = False
-            await asyncio.wait_for(reading.wait(), timeout=2)
-            raise TimeoutError
-        return await wait_on_shared_future(shared, timeout=timeout, **kwargs)
-
+    monkeypatch.setattr(asyncio, "timeout", capture_timeout)
     import app.core.utils.sse as sse
 
-    monkeypatch.setattr(sse, "wait_on_shared_future", heartbeat_wait)
     injected = inject_sse_keepalives(source, 10, on_keepalive=keepalive.set)
     cleanup = api._ResponsesReservationCleanup(
         owns_reservation=False, reservation=None, scheduler=None, request_id="fixture"

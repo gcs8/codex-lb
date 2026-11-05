@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TypedDict
 
@@ -25,6 +25,26 @@ from app.db.session import SessionLocal
 from tests.integration.test_stream_wrapper_lease import _setup
 
 pytestmark = pytest.mark.integration
+
+
+def _control_sse_idle_expiry(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
+    real_timeout = asyncio.timeout
+    timers: dict[object, asyncio.Timeout] = {}
+
+    def capture_timeout(delay: float | None) -> asyncio.Timeout:
+        timer = real_timeout(delay)
+        task = asyncio.current_task()
+        if task is not None:
+            timers[task] = timer
+        return timer
+
+    def expire() -> None:
+        task = asyncio.current_task()
+        assert task is not None and task in timers
+        timers[task].reschedule(asyncio.get_running_loop().time() - 1)
+
+    monkeypatch.setattr(asyncio, "timeout", capture_timeout)
+    return expire
 
 
 class _StreamPhase(TypedDict, total=False):
@@ -119,15 +139,16 @@ async def test_real_asgi_disconnect_drains_retained_retry_and_exact_reservation(
     phase["delta_sent"] = False
     phase["heartbeat_for_read"] = False
     original_wait = wait_on_shared_future
+    expire_idle = _control_sse_idle_expiry(monkeypatch)
 
     async def causal_keepalive(shared, *, timeout=None, **kwargs):
         if mode == "gap" and not phase["heartbeat_for_read"]:
             await asyncio.wait_for(phase["arrived"].wait(), timeout=3)
             phase["heartbeat_for_read"] = True
-            raise TimeoutError
+            expire_idle()
         if phase["delta_sent"] and not phase["heartbeat_for_read"]:
             phase["heartbeat_for_read"] = True
-            raise TimeoutError
+            expire_idle()
         return await original_wait(shared, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(sse, "wait_on_shared_future", causal_keepalive)
@@ -225,12 +246,13 @@ async def test_send_cancellation_must_enter_wrapper_cleanup(async_client, app_in
     delta_sent = False
     heartbeat_due = False
     send_blocked = asyncio.Event()
+    expire_idle = _control_sse_idle_expiry(monkeypatch)
 
     async def causal_wait(shared, *, timeout=None, **kwargs):
         nonlocal heartbeat_due
         if delta_sent and not heartbeat_due:
             heartbeat_due = True
-            raise TimeoutError
+            expire_idle()
         return await wait_on_shared_future(shared, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(sse, "wait_on_shared_future", causal_wait)
