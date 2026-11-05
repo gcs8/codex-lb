@@ -370,3 +370,16 @@ A failed account-error health write must not replace a Responses terminal that t
 Scheduled cleanup compares the selected observation timestamp, admission generation, failure count and null-safe failure detail before deletion. For example, an old row at generation 3 survives if a replay claims generation 4 after cleanup selected it, even when the timestamp still meets the age cutoff. A conditional-delete miss ends that cleanup pass after its selected batch; the next scheduled pass applies the normal retention rules to the surviving state. See the scheduled cleanup requirement in [spec.md](spec.md).
 
 This uses existing columns and does not establish leased-receipt lifetime protection. The receipt lifecycle and stranded-owner and success-versus-claim policy decisions remain separate in #2271 and PR #1954.
+
+## Native WebSocket receive bursts
+
+The decoded native WebSocket receive queue shares byte accounting with the
+existing helper event queue. A 4096-event cap permits ordinary small-frame
+bursts; a 32 MiB accounted-payload cap bounds stalled consumers. Interpreted
+Responses frames retain text and a decoded representation, so both count.
+Overflow is a local consumer condition, not evidence of an unhealthy account.
+
+For example, a 256-frame reasoning burst can remain queued while a send
+acknowledgement completes. Sustained overflow still terminates that connection
+without stopping the shared helper reader or unrelated connections. No automatic
+replay is added because a dispatched request may already have had effects.
