@@ -113,13 +113,51 @@ describe("AppearanceSettings", () => {
     expect(useAccountQuotaDisplayStore.getState().quotaDisplay).toBe("weekly");
   });
 
-  it("localizes the account burn projection row in zh-CN", async () => {
+  it.each([
+    [
+      "en",
+      "Pool burn projection",
+      "Show projected demand vs pool capacity on the dashboard.",
+      "Show pool burn projection",
+    ],
+    ["ko", "풀 소진 예측", "대시보드에 풀 용량 대비 예상 수요를 표시합니다.", "풀 소진 예측 표시"],
+    ["zh-CN", "池消耗预测", "在仪表盘上显示预计需求与池容量的对比。", "显示池消耗预测"],
+  ])(
+    "labels the pool burn preference and preserves its storage key in %s",
+    async (language, label, description, accessibleName) => {
+      await i18n.changeLanguage(language);
+      try {
+        const user = userEvent.setup();
+        useDashboardPreferencesStore.setState({ accountBurnrateEnabled: true });
+        const { unmount } = render(<AppearanceSettings />);
+
+        expect(screen.getByText(label)).toBeInTheDocument();
+        expect(screen.getByText(description)).toBeInTheDocument();
+        const toggle = screen.getByRole("switch", { name: accessibleName });
+        expect(toggle).toBeChecked();
+
+        await user.click(toggle);
+        expect(toggle).not.toBeChecked();
+        expect(useDashboardPreferencesStore.getState().accountBurnrateEnabled).toBe(false);
+        expect(window.localStorage.getItem("codex-lb-account-burnrate-enabled")).toBe("false");
+
+        await user.click(toggle);
+        expect(toggle).toBeChecked();
+        expect(window.localStorage.getItem("codex-lb-account-burnrate-enabled")).toBe("true");
+        unmount();
+      } finally {
+        await i18n.changeLanguage("en");
+      }
+    },
+  );
+
+  it("localizes the pool burn projection row in zh-CN", async () => {
     await i18n.changeLanguage("zh-CN");
     try {
       render(<AppearanceSettings />);
 
-      expect(screen.getByText("账户消耗预测")).toBeInTheDocument();
-      expect(screen.getByText("在仪表盘上显示账户等效预测卡片。")).toBeInTheDocument();
+      expect(screen.getByText("池消耗预测")).toBeInTheDocument();
+      expect(screen.getByText("在仪表盘上显示预计需求与池容量的对比。")).toBeInTheDocument();
       expect(screen.queryByText("Account burn projection")).not.toBeInTheDocument();
       expect(
         screen.queryByText("Show the account-equivalent projection card on the dashboard."),
