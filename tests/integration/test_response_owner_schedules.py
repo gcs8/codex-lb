@@ -15,7 +15,12 @@ import app.core.utils.sse as sse
 from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import ApiKeyLimit, ApiKeyUsageReservation, ApiKeyUsageReservationItem, RequestLog
 from app.db.session import SessionLocal
-from tests.integration.test_stream_cleanup_schedules import _assert_released, _blocked_upstream, _StreamPhase
+from tests.integration.test_stream_cleanup_schedules import (
+    _assert_released,
+    _blocked_upstream,
+    _control_sse_idle_expiry,
+    _StreamPhase,
+)
 from tests.integration.test_stream_wrapper_lease import _loopback_upstream, _setup
 from tests.unit.test_websocket_transport_fallback import _pre_submit_error
 
@@ -35,12 +40,13 @@ async def test_real_send_exit_recovers_nine_slots(
     heartbeat = False
     blocked = asyncio.Event()
     fail_send = asyncio.Event()
+    expire_idle = _control_sse_idle_expiry(monkeypatch)
 
     async def causal_wait(shared, *, timeout=None, **kwargs):
         nonlocal heartbeat
         if delta and not heartbeat:
             heartbeat = True
-            raise TimeoutError
+            expire_idle()
         return await wait_on_shared_future(shared, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(sse, "wait_on_shared_future", causal_wait)
